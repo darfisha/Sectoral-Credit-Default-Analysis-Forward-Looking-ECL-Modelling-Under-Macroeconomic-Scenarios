@@ -8,4 +8,5 @@ seaborn
 openpyxl
 xlrd
 python-dateutil
-
+xgboost
+catboost
