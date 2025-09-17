@@ -1,4 +1,8 @@
 # ===============================
+# xav_proj_streamified.py
+# ===============================
+
+# ===============================
 # 1️⃣ IMPORTS
 # ===============================
 import os
@@ -11,7 +15,7 @@ import statsmodels.api as sm
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split, RandomizedSearchCV, cross_val_score
-from sklearn.metrics import (accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, confusion_matrix)
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
 
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
@@ -23,9 +27,6 @@ from sklearn.svm import SVC
 from sklearn.naive_bayes import GaussianNB
 
 import shap
-
-# Optional: install catboost if not already
-# !pip install catboost
 
 # ===============================
 # 2️⃣ DATA LOADING & CLEANING
@@ -61,9 +62,9 @@ def load_credit_data(file_path: str, india_only=True):
 # ===============================
 def preprocess_financials(df):
     numeric_cols = [
-        'interest_rate', 'original_principal_amount_ususd', 'cancelled_amount_ususd',
-        'undisbursed_amount_ususd', 'disbursed_amount_ususd', 'repaid_to_ibrd_ususd',
-        'due_to_ibrd_ususd','exchange_adjustment_ususd', 'borrowers_obligation_ususd', 'loans_held_ususd'
+        'interest_rate', 'original_principal_amount_usd', 'cancelled_amount_usd',
+        'undisbursed_amount_usd', 'disbursed_amount_usd', 'repaid_to_ibrd_usd',
+        'due_to_ibrd_usd','exchange_adjustment_usd', 'borrowers_obligation_usd', 'loans_held_usd'
     ]
     df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors='coerce')
     for col in numeric_cols:
@@ -90,13 +91,15 @@ def encode_default_flags(df):
             return 1 if disbursed_amount and disbursed_amount > 0 else 0
         return 1
     
-    df["default_flag"] = df.apply(lambda row: encode_default_balanced(row["loan_status"], row["disbursed_amount_ususd"]), axis=1)
+    df["default_flag"] = df.apply(lambda row: encode_default_balanced(row["loan_status"], row.get("disbursed_amount_usd", 0)), axis=1)
     return df
 
 def add_engineered_features(df):
-    df['year'] = df['agreement_signing_date'].dt.year
-    df['loan_to_gdp_growth_ratio'] = (df['original_principal_amount_ususd'] / (df['gdp_growth']*1e9)).replace([np.inf, -np.inf], 0)
-    df['repayment_ratio'] = (df['repaid_to_ibrd_ususd'] / df['disbursed_amount_ususd']).replace([np.inf, -np.inf], 0)
+    if 'agreement_signing_date' in df.columns:
+        df['year'] = df['agreement_signing_date'].dt.year
+    if 'gdp_growth' in df.columns:
+        df['loan_to_gdp_growth_ratio'] = (df['original_principal_amount_usd'] / (df['gdp_growth']*1e9)).replace([np.inf, -np.inf], 0)
+    df['repayment_ratio'] = (df['repaid_to_ibrd_usd'] / df['disbursed_amount_usd']).replace([np.inf, -np.inf], 0)
     return df
 
 # ===============================
@@ -158,30 +161,26 @@ def train_evaluate_models(X_train, y_train, X_test, y_test):
     
     results_df = pd.DataFrame(results, columns=["Model","Accuracy","Precision","Recall","F1-Score","ROC-AUC"])
     results_df = results_df.sort_values("ROC-AUC", ascending=False).reset_index(drop=True)
-    return results_df
+    return results_df, models
 
 # ===============================
 # 6️⃣ EAD / LGD / PD / ECL CALCULATION
 # ===============================
 def compute_ecl(merged_df, usd_to_inr=83):
-    # Latest loans
-    merged_df = merged_df.sort_values(['project_name','end_of_period']).dropna(subset=['borrowers_obligation_ususd'])
+    merged_df = merged_df.sort_values(['project_name','end_of_period']).dropna(subset=['borrowers_obligation_usd'])
     latest_dates = merged_df.groupby('project_name')['end_of_period'].max().reset_index()
     latest_loans = pd.merge(merged_df, latest_dates, on=['project_name','end_of_period'], how='inner')
     
-    # Weighted PD
     pd_weighted = latest_loans.groupby('project_name').apply(
-        lambda x: pd.Series({'PD': (x['borrowers_obligation_ususd']*usd_to_inr*x['default_prob']).sum() / (x['borrowers_obligation_ususd']*usd_to_inr).sum()})
+        lambda x: pd.Series({'PD': (x['borrowers_obligation_usd']*usd_to_inr*x['default_flag']).sum() / (x['borrowers_obligation_usd']*usd_to_inr).sum()})
     ).reset_index()
     
-    # EAD summary
     ead_summary = latest_loans.groupby('project_name', as_index=False).agg(
         total_active_loans=('loan_number','count'),
-        EAD_INR=('borrowers_obligation_ususd', lambda x: x.sum()*usd_to_inr)
+        EAD_INR=('borrowers_obligation_usd', lambda x: x.sum()*usd_to_inr)
     )
     
-    # LGD calculation
-    merged_df['borrowers_obligation_inr'] = merged_df['borrowers_obligation_ususd'] * usd_to_inr
+    merged_df['borrowers_obligation_inr'] = merged_df['borrowers_obligation_usd'] * usd_to_inr
     merged_df['LGD'] = merged_df['borrowers_obligation_inr'] * merged_df['default_flag']
     
     ecl_df = pd.merge(ead_summary, pd_weighted, on='project_name', how='left')
@@ -191,12 +190,18 @@ def compute_ecl(merged_df, usd_to_inr=83):
     return ecl_df
 
 # ===============================
-# 7️⃣ SHAP INTERPRETABILITY
+# 7️⃣ SHAP INTERPRETABILITY (Tree-Based Only)
 # ===============================
-def shap_analysis(model, X_train, feature_names):
-    explainer = shap.Explainer(model, X_train)
-    shap_values = explainer(X_train)
-    shap.summary_plot(shap_values, features=X_train, feature_names=feature_names)
+def shap_analysis_safe(model, X_train, feature_names, model_name="Model"):
+    try:
+        if model_name in ["XGBoost", "Random Forest", "CatBoost", "Gradient Boosting", "Decision Tree"]:
+            explainer = shap.TreeExplainer(model)
+            shap_values = explainer.shap_values(X_train)
+            shap.summary_plot(shap_values, features=X_train, feature_names=feature_names)
+        else:
+            print(f"SHAP skipped for {model_name} (non-tree model)")
+    except Exception as e:
+        print(f"SHAP analysis failed for {model_name}: {e}")
 
 # ===============================
 # 8️⃣ VISUALIZATION HELPERS
@@ -220,8 +225,12 @@ if __name__ == "__main__":
     
     X_train, y_train, X_val, y_val, X_test, y_test, train_df, val_df, test_df = split_chronologically(df, numeric_cols)
     
-    results_df = train_evaluate_models(X_train, y_train, X_test, y_test)
+    results_df, models = train_evaluate_models(X_train, y_train, X_test, y_test)
     print(results_df)
     
     ecl_df = compute_ecl(df)
     plot_top_projects(ecl_df)
+    
+    # Run SHAP for all tree-based models safely
+    for model_name, model in models.items():
+        shap_analysis_safe(model, X_train, numeric_cols, model_name)
