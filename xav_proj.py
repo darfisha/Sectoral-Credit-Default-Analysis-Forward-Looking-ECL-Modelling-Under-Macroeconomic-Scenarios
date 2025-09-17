@@ -2,23 +2,44 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
-# --- Step 1: Make sure we have sector info ---
+# -------------------------------
+# Step 0: Check required DataFrames
+# -------------------------------
+required_dfs = ['merged_df', 'ecl_compare_df']
+for df_name in required_dfs:
+    if df_name not in globals() or not isinstance(globals()[df_name], pd.DataFrame):
+        raise ValueError(f"❌ {df_name} is not defined. Please load it as a pandas DataFrame before running this script.")
+
+# -------------------------------
+# Step 1: Ensure sector info exists
+# -------------------------------
 if "sector" in merged_df.columns:
-    # sector info already inside merged_df
     project_sector_map = merged_df[['project_name','sector']].drop_duplicates()
-elif "sector_mapping" in globals():
-    # if you had created a mapping earlier with another name
+elif "sector_mapping" in globals() and isinstance(sector_mapping, pd.DataFrame):
     project_sector_map = sector_mapping[['project_name','sector']].drop_duplicates()
 else:
-    raise ValueError("❌ Could not find project → sector mapping. Please provide a DataFrame with columns ['project_name','sector'].")
+    raise ValueError("❌ Could not find project → sector mapping. Provide a DataFrame with columns ['project_name','sector'].")
 
-# --- Step 2: Merge sector info into ECL Data ---
-ecl_sector_df = (
-    ecl_compare_df
-    .merge(project_sector_map, on='project_name', how='left')
-)
+# -------------------------------
+# Step 2: Merge sector info into ECL data
+# -------------------------------
+if 'project_name' not in ecl_compare_df.columns:
+    raise ValueError("❌ ecl_compare_df must contain the column 'project_name'.")
 
-# --- Step 3: Aggregate at Sector Level ---
+ecl_sector_df = ecl_compare_df.merge(project_sector_map, on='project_name', how='left')
+
+# Check for missing sectors after merge
+if ecl_sector_df['sector'].isna().any():
+    missing_projects = ecl_sector_df[ecl_sector_df['sector'].isna()]['project_name'].unique()
+    print(f"⚠️ Warning: The following projects have no sector mapping: {missing_projects}")
+
+# -------------------------------
+# Step 3: Aggregate at sector level
+# -------------------------------
+for col in ['EAD_INR','ECL_Base_INR','ECL_Stressed_INR']:
+    if col not in ecl_sector_df.columns:
+        raise ValueError(f"❌ Column '{col}' not found in ecl_compare_df.")
+
 sector_summary = (
     ecl_sector_df
     .groupby('sector')
@@ -30,15 +51,17 @@ sector_summary = (
     .reset_index()
 )
 
-# --- Step 4: Calculate Change (absolute & %) ---
-sector_summary['Change_INR'] = (
-    sector_summary['ECL_Stressed_INR'] - sector_summary['ECL_Base_INR']
-)
+# -------------------------------
+# Step 4: Calculate changes
+# -------------------------------
+sector_summary['Change_INR'] = sector_summary['ECL_Stressed_INR'] - sector_summary['ECL_Base_INR']
 sector_summary['Change_%'] = (
     (sector_summary['Change_INR'] / sector_summary['ECL_Base_INR'].replace(0, np.nan)) * 100
 ).round(2)
 
-# --- Step 5: Human-readable formatting ---
+# -------------------------------
+# Step 5: Human-readable formatting
+# -------------------------------
 def human_readable(num):
     if num >= 1e9:
         return f"{num/1e9:.0f} Billion"
@@ -56,7 +79,9 @@ for col in ['EAD_INR','ECL_Base_INR','ECL_Stressed_INR','Change_INR']:
 print("\n✅ Sectoral ECL - Before vs After Stress Testing\n")
 print(sector_display[['sector','EAD_INR','ECL_Base_INR','ECL_Stressed_INR','Change_INR','Change_%']])
 
-# --- Step 6: Visualization ---
+# -------------------------------
+# Step 6: Visualization
+# -------------------------------
 plot_df = sector_summary.sort_values('ECL_Stressed_INR', ascending=False).head(10)
 
 plt.figure(figsize=(14,7))
@@ -75,7 +100,6 @@ plt.barh(index + bar_width/2,
 
 plt.yticks(index, plot_df['sector'])
 plt.gca().invert_yaxis()
-
 plt.title("Top 10 Sectors: Baseline vs Stressed ECL", fontsize=14)
 plt.xlabel("ECL (INR Billion)")
 plt.ylabel("Sector")
