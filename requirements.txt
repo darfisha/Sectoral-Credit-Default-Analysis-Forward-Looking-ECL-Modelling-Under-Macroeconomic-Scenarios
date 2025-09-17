@@ -4,13 +4,12 @@ scipy
 scikit-learn
 statsmodels
 xgboost
-numba==0.60.3
-shap==0.42.1
 matplotlib
 seaborn
 openpyxl
 xlrd
 python-dateutil
+
 
 
 
