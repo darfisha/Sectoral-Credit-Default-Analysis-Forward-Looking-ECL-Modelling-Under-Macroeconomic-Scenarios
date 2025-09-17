@@ -9,6 +9,7 @@ seaborn
 openpyxl
 xlrd
 python-dateutil
+shap
 
 
 
