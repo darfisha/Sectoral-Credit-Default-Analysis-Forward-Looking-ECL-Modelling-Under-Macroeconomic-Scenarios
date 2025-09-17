@@ -1,14 +1,23 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import os
 
 # -------------------------------
-# Step 0: Check required DataFrames
+# Step 0: Load required DataFrames
 # -------------------------------
-required_dfs = ['merged_df', 'ecl_compare_df']
-for df_name in required_dfs:
-    if df_name not in globals() or not isinstance(globals()[df_name], pd.DataFrame):
-        raise ValueError(f"❌ {df_name} is not defined. Please load it as a pandas DataFrame before running this script.")
+data_files = {
+    'merged_df': 'merged_df.csv',           # Path to your merged_df CSV
+    'ecl_compare_df': 'ecl_compare_df.csv'  # Path to your ECL comparison CSV
+}
+
+for df_name, path in data_files.items():
+    if df_name not in globals():
+        if os.path.exists(path):
+            globals()[df_name] = pd.read_csv(path)
+            print(f"✅ Loaded {df_name} from {path}")
+        else:
+            raise FileNotFoundError(f"❌ {df_name} not found in globals and file '{path}' does not exist. Please provide the file.")
 
 # -------------------------------
 # Step 1: Ensure sector info exists
@@ -28,10 +37,11 @@ if 'project_name' not in ecl_compare_df.columns:
 
 ecl_sector_df = ecl_compare_df.merge(project_sector_map, on='project_name', how='left')
 
-# Check for missing sectors after merge
-if ecl_sector_df['sector'].isna().any():
-    missing_projects = ecl_sector_df[ecl_sector_df['sector'].isna()]['project_name'].unique()
-    print(f"⚠️ Warning: The following projects have no sector mapping: {missing_projects}")
+# Automatically fill missing sectors with 'Unknown'
+missing_count = ecl_sector_df['sector'].isna().sum()
+if missing_count > 0:
+    print(f"⚠️ Warning: {missing_count} projects had no sector mapping. Assigning 'Unknown'.")
+    ecl_sector_df['sector'] = ecl_sector_df['sector'].fillna('Unknown')
 
 # -------------------------------
 # Step 3: Aggregate at sector level
@@ -88,12 +98,10 @@ plt.figure(figsize=(14,7))
 bar_width = 0.35
 index = np.arange(len(plot_df))
 
-# Baseline bars
 plt.barh(index - bar_width/2,
          plot_df['ECL_Base_INR']/1e9,
          bar_width, label="Baseline ECL", color='steelblue')
 
-# Stressed bars
 plt.barh(index + bar_width/2,
          plot_df['ECL_Stressed_INR']/1e9,
          bar_width, label="Stressed ECL", color='crimson')
@@ -106,7 +114,6 @@ plt.ylabel("Sector")
 plt.legend()
 plt.tight_layout()
 
-# Add value labels
 for i, (base, stress) in enumerate(zip(plot_df['ECL_Base_INR'], plot_df['ECL_Stressed_INR'])):
     plt.text(base/1e9, i - bar_width/2, human_readable(base), va='center', ha='left', fontsize=8)
     plt.text(stress/1e9, i + bar_width/2, human_readable(stress), va='center', ha='left', fontsize=8)
