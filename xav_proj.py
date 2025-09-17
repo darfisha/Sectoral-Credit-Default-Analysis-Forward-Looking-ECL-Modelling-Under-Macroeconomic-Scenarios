@@ -22,7 +22,7 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import SVC
 from sklearn.naive_bayes import GaussianNB
 
-# Safe SHAP import for Python 3.13
+# Safe SHAP import
 try:
     import shap
 except ImportError:
@@ -110,7 +110,7 @@ def split_chronologically(df, numeric_cols):
     X_train_scaled = scaler.fit_transform(imputer.fit_transform(X_train))
     X_val_scaled   = scaler.transform(imputer.transform(X_val))
     X_test_scaled  = scaler.transform(imputer.transform(X_test))
-    return X_train_scaled, y_train, X_val_scaled, y_val, X_test_scaled, y_test
+    return X_train_scaled, y_train, X_val_scaled, y_val, X_test_scaled, y_test, train_df, val_df, test_df
 
 # ===============================
 # MODEL TRAINING
@@ -143,6 +143,38 @@ def train_evaluate_models(X_train, y_train, X_test, y_test):
     return results_df
 
 # ===============================
+# ECL CALCULATION
+# ===============================
+def compute_ecl(merged_df, usd_to_inr=83):
+    merged_df = merged_df.sort_values(['project_name','end_of_period']).dropna(subset=['borrowers_obligation_ususd'])
+    latest_dates = merged_df.groupby('project_name')['end_of_period'].max().reset_index()
+    latest_loans = pd.merge(merged_df, latest_dates, on=['project_name','end_of_period'], how='inner')
+    pd_weighted = latest_loans.groupby('project_name').apply(
+        lambda x: pd.Series({'PD': (x['borrowers_obligation_ususd']*usd_to_inr*x['default_flag']).sum() / (x['borrowers_obligation_ususd']*usd_to_inr).sum()})
+    ).reset_index()
+    ead_summary = latest_loans.groupby('project_name', as_index=False).agg(
+        total_active_loans=('loan_number','count'),
+        EAD_INR=('borrowers_obligation_ususd', lambda x: x.sum()*usd_to_inr)
+    )
+    merged_df['borrowers_obligation_inr'] = merged_df['borrowers_obligation_ususd'] * usd_to_inr
+    merged_df['LGD'] = merged_df['borrowers_obligation_inr'] * merged_df['default_flag']
+    ecl_df = pd.merge(ead_summary, pd_weighted, on='project_name', how='left')
+    ecl_df['LGD'] = merged_df.groupby('project_name')['LGD'].sum().values
+    ecl_df['ECL'] = ecl_df['PD'] * ecl_df['LGD']
+    return ecl_df
+
+# ===============================
+# VISUALIZATION
+# ===============================
+def plot_top_projects(ecl_df, top_n=10):
+    top_projects = ecl_df.sort_values('ECL', ascending=False).head(top_n)
+    fig, ax = plt.subplots(figsize=(12,6))
+    sns.barplot(x='project_name', y='ECL', data=top_projects, ax=ax)
+    ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha='right')
+    ax.set_title("Top Projects by ECL")
+    st.pyplot(fig)
+
+# ===============================
 # STREAMLIT APP
 # ===============================
 st.title("Sectoral Credit Default Analysis (ECL Model)")
@@ -158,8 +190,16 @@ if uploaded_file is not None:
     df, numeric_cols = preprocess_financials(df)
     df = add_engineered_features(df)
 
-    X_train, y_train, X_val, y_val, X_test, y_test = split_chronologically(df, numeric_cols)
+    X_train, y_train, X_val, y_val, X_test, y_test, train_df, val_df, test_df = split_chronologically(df, numeric_cols)
 
     st.subheader("Model Training & Evaluation")
     results_df = train_evaluate_models(X_train, y_train, X_test, y_test)
     st.dataframe(results_df)
+
+    st.subheader("Expected Credit Loss (ECL) Calculation")
+    ecl_df = compute_ecl(df)
+    st.dataframe(ecl_df.sort_values("ECL", ascending=False).head(10))
+
+    st.subheader("Top Projects by ECL")
+    top_n = st.slider("Number of top projects to show", min_value=5, max_value=20, value=10)
+    plot_top_projects(ecl_df, top_n=top_n)
