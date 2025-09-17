@@ -1,136 +1,212 @@
+# streamlit_app.py
 import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import seaborn as sns
+from catboost import CatBoostClassifier
+from sklearn.preprocessing import StandardScaler
+from sklearn.impute import SimpleImputer
 
-st.set_page_config(layout="wide")
-st.title("Sectoral ECL Analysis - Baseline vs Stressed")
+st.set_page_config(page_title="India Credit Risk Dashboard", layout="wide")
 
-# -------------------------------
-# Step 0: Upload or load DataFrames
-# -------------------------------
-st.sidebar.header("Upload CSV files")
-merged_file = st.sidebar.file_uploader("Upload merged_df CSV", type="csv")
-ecl_file = st.sidebar.file_uploader("Upload ecl_compare_df CSV", type="csv")
+# --------------------------
+# Sidebar: File upload
+# --------------------------
+st.sidebar.title("Upload your data")
+uploaded_file = st.sidebar.file_uploader("Upload CSV", type="csv")
 
-if merged_file is not None:
-    merged_df = pd.read_csv(merged_file)
-    st.success("✅ merged_df loaded successfully!")
+# Load default data if no upload
+if uploaded_file is not None:
+    df = pd.read_csv(uploaded_file, parse_dates=True)
+    st.success("File uploaded successfully!")
 else:
-    st.warning("⚠️ Please upload merged_df CSV to continue.")
-    st.stop()
+    st.warning("Using default 'india_credit_risk.csv'")
+    df = pd.read_csv("india_credit_risk.csv", parse_dates=True)
 
-if ecl_file is not None:
-    ecl_compare_df = pd.read_csv(ecl_file)
-    st.success("✅ ecl_compare_df loaded successfully!")
-else:
-    st.warning("⚠️ Please upload ecl_compare_df CSV to continue.")
-    st.stop()
+# --------------------------
+# Preprocessing
+# --------------------------
+st.header("Data Preprocessing")
 
-# -------------------------------
-# Step 1: Ensure sector info exists
-# -------------------------------
-if "sector" in merged_df.columns:
-    project_sector_map = merged_df[['project_name','sector']].drop_duplicates()
-elif "sector_mapping" in globals() and isinstance(sector_mapping, pd.DataFrame):
-    project_sector_map = sector_mapping[['project_name','sector']].drop_duplicates()
-else:
-    st.error("❌ Could not find project → sector mapping. Provide a DataFrame with columns ['project_name','sector'].")
-    st.stop()
+# Clean column names
+df.columns = [
+    col.strip().lower().replace(" ", "_").replace("/", "_").replace("(", "").replace(")", "").replace("$", "usd").replace("'", "").replace(".", "")
+    for col in df.columns
+]
 
-# -------------------------------
-# Step 2: Merge sector info into ECL data
-# -------------------------------
-if 'project_name' not in ecl_compare_df.columns:
-    st.error("❌ ecl_compare_df must contain the column 'project_name'.")
-    st.stop()
+# Filter India
+india_df = df[df['country___economy'].str.strip() == 'India'].copy()
 
-ecl_sector_df = ecl_compare_df.merge(project_sector_map, on='project_name', how='left')
+# Drop useless columns
+drop_cols = ['currency_of_commitment']
+for col in drop_cols:
+    if col in india_df.columns:
+        india_df.drop(columns=[col], inplace=True)
 
-# Automatically fill missing sectors with 'Unknown'
-missing_count = ecl_sector_df['sector'].isna().sum()
-if missing_count > 0:
-    st.warning(f"⚠️ {missing_count} projects had no sector mapping. Assigning 'Unknown'.")
-    ecl_sector_df['sector'] = ecl_sector_df['sector'].fillna('Unknown')
+# Convert dates
+date_cols = ['end_of_period', 'first_repayment_date', 'last_repayment_date', 
+             'agreement_signing_date', 'board_approval_date', 'effective_date_most_recent', 
+             'closed_date_most_recent', 'last_disbursement_date']
 
-# -------------------------------
-# Step 3: Aggregate at sector level
-# -------------------------------
-for col in ['EAD_INR','ECL_Base_INR','ECL_Stressed_INR']:
-    if col not in ecl_sector_df.columns:
-        st.error(f"❌ Column '{col}' not found in ecl_compare_df.")
-        st.stop()
+for col in date_cols:
+    if col in india_df.columns:
+        india_df[col] = pd.to_datetime(india_df[col], errors='coerce')
 
-sector_summary = (
-    ecl_sector_df
-    .groupby('sector')
-    .agg({
-        'EAD_INR':'sum',
-        'ECL_Base_INR':'sum',
-        'ECL_Stressed_INR':'sum'
-    })
-    .reset_index()
+india_df["origination_year"] = india_df["agreement_signing_date"].dt.year.astype("Int64")
+
+# Numeric features
+numeric_cols = [
+    'interest_rate', 'original_principal_amount_ususd', 'cancelled_amount_ususd',
+    'undisbursed_amount_ususd', 'disbursed_amount_ususd', 'repaid_to_ibrd_ususd',
+    'due_to_ibrd_ususd','exchange_adjustment_ususd', 'borrowers_obligation_ususd', 'loans_held_ususd'
+]
+india_df[numeric_cols] = india_df[numeric_cols].apply(pd.to_numeric, errors='coerce')
+for col in numeric_cols:
+    india_df[col] = india_df[col].apply(lambda x: np.nan if x < 0 else x)
+
+# Loan status & default
+active_statuses = ['REPAYING','DISBURSED','DISBURSING','DISBURSING&REPAYING',
+                   'FULLY DISBURSED','FULLY TRANSFERRED','APPROVED','SIGNED','EFFECTIVE']
+
+india_df['loan_status'] = india_df['loan_status'].astype('string').str.strip().str.upper()
+india_df["is_active"] = india_df["loan_status"].isin(active_statuses).astype(int)
+
+def encode_default_balanced(status, disbursed_amount):
+    if not isinstance(status, str):
+        return 1
+    status = status.strip().upper()
+    if status in ["FULLY REPAID", "SIGNED", "APPROVED", "DISBURSING"]:
+        return 0
+    if status in ["REPAYING", "DISBURSED", "DISBURSING&REPAYING", "FULLY DISBURSED"]:
+        return 1
+    if status in ["CANCELLED", "FULLY CANCELLED"]:
+        return 1 if disbursed_amount and disbursed_amount > 0 else 0
+    return 1
+
+india_df["default_flag"] = india_df.apply(lambda row: encode_default_balanced(row["loan_status"], row["disbursed_amount_ususd"]), axis=1)
+
+st.subheader("Dataset Overview")
+st.write(india_df.head())
+
+# --------------------------
+# EAD, LGD, PD, ECL Calculations
+# --------------------------
+st.header("ECL Calculation")
+
+usd_to_inr = 83
+
+# Filter and sort
+merged_df = india_df.copy()
+merged_df = merged_df.sort_values(by=['project_name', 'end_of_period'])
+merged_df = merged_df.dropna(subset=['project_name','borrowers_obligation_ususd'])
+
+# Latest loans per project
+latest_dates = merged_df.groupby('project_name')['end_of_period'].max().reset_index()
+latest_loans = pd.merge(merged_df, latest_dates, on=['project_name','end_of_period'], how='inner')
+
+# Weighted PD
+pd_weighted = latest_loans.groupby('project_name').apply(
+    lambda x: pd.Series({'PD': (x['borrowers_obligation_ususd'] * usd_to_inr * x['default_flag']).sum() /
+                                  (x['borrowers_obligation_ususd'] * usd_to_inr).sum()})
+).reset_index()
+
+# EAD summary
+ead_summary = latest_loans.groupby('project_name', as_index=False).agg(
+    total_active_loans=('loan_number', 'count'),
+    EAD_INR=('borrowers_obligation_ususd', lambda x: (x.sum() * usd_to_inr))
 )
 
-# -------------------------------
-# Step 4: Calculate changes
-# -------------------------------
-sector_summary['Change_INR'] = sector_summary['ECL_Stressed_INR'] - sector_summary['ECL_Base_INR']
-sector_summary['Change_%'] = (
-    (sector_summary['Change_INR'] / sector_summary['ECL_Base_INR'].replace(0, np.nan)) * 100
-).round(2)
+# LGD
+merged_df['borrowers_obligation_inr'] = merged_df['borrowers_obligation_ususd'] * usd_to_inr
+merged_df['repaid_to_ibrd_inr'] = merged_df['repaid_to_ibrd_ususd'] * usd_to_inr
+merged_df['LGD'] = ((merged_df['borrowers_obligation_inr'] - merged_df['repaid_to_ibrd_inr']) / merged_df['borrowers_obligation_inr'])
+merged_df.loc[merged_df['default_flag']==0,'LGD'] = 0
 
-# -------------------------------
-# Step 5: Human-readable formatting
-# -------------------------------
-def human_readable(num):
-    if num >= 1e9:
-        return f"{num/1e9:.0f} Billion"
-    elif num >= 1e6:
-        return f"{num/1e6:.0f} Million"
-    elif num >= 1e3:
-        return f"{num/1e3:.0f} Thousand"
-    else:
-        return f"{num:.0f}"
+lgd_all_projects = merged_df.groupby('project_name', as_index=False).apply(
+    lambda x: pd.Series({
+        'EAD_INR': x['borrowers_obligation_inr'].sum(),
+        'LGD': ((x['borrowers_obligation_inr'] * x['LGD']).sum()) / x['borrowers_obligation_inr'].sum()
+    })
+).reset_index(drop=True)
 
-sector_display = sector_summary.copy()
-for col in ['EAD_INR','ECL_Base_INR','ECL_Stressed_INR','Change_INR']:
-    sector_display[col] = sector_display[col].apply(human_readable)
+# Merge all
+ecl_df = (ead_summary[['project_name','EAD_INR']]
+          .merge(lgd_all_projects[['project_name','LGD']], on='project_name', how='left')
+          .merge(pd_weighted, on='project_name', how='left'))
 
-st.subheader("✅ Sectoral ECL - Before vs After Stress Testing")
-st.dataframe(sector_display[['sector','EAD_INR','ECL_Base_INR','ECL_Stressed_INR','Change_INR','Change_%']])
+ecl_df['ECL_INR'] = ecl_df['EAD_INR'] * ecl_df['LGD'] * ecl_df['PD']
+ecl_df = ecl_df.sort_values('ECL_INR', ascending=False)
 
-# -------------------------------
-# Step 6: Visualization
-# -------------------------------
-plot_df = sector_summary.sort_values('ECL_Stressed_INR', ascending=False).head(10)
+st.subheader("Top 20 Projects by ECL")
+st.write(ecl_df[['project_name','EAD_INR','LGD','PD','ECL_INR']].head(20))
 
-fig, ax = plt.subplots(figsize=(14,7))
-bar_width = 0.35
-index = np.arange(len(plot_df))
+# --------------------------
+# Visualization
+# --------------------------
+st.header("Visualizations")
 
-# Baseline bars
-ax.barh(index - bar_width/2,
-        plot_df['ECL_Base_INR']/1e9,
-        bar_width, label="Baseline ECL", color='steelblue')
-
-# Stressed bars
-ax.barh(index + bar_width/2,
-        plot_df['ECL_Stressed_INR']/1e9,
-        bar_width, label="Stressed ECL", color='crimson')
-
-ax.set_yticks(index)
-ax.set_yticklabels(plot_df['sector'])
+# Top ECL bar chart
+top_plot = ecl_df.head(15)
+fig, ax = plt.subplots(figsize=(12,6))
+ax.barh(top_plot["project_name"], top_plot["ECL_INR"]/1e9, color="tomato")
 ax.invert_yaxis()
-ax.set_title("Top 10 Sectors: Baseline vs Stressed ECL", fontsize=14)
 ax.set_xlabel("ECL (INR Billion)")
-ax.set_ylabel("Sector")
-ax.legend()
-plt.tight_layout()
-
-# Add value labels
-for i, (base, stress) in enumerate(zip(plot_df['ECL_Base_INR'], plot_df['ECL_Stressed_INR'])):
-    ax.text(base/1e9, i - bar_width/2, human_readable(base), va='center', ha='left', fontsize=8)
-    ax.text(stress/1e9, i + bar_width/2, human_readable(stress), va='center', ha='left', fontsize=8)
-
+ax.set_ylabel("Project")
+ax.set_title("Top 15 Projects by Expected Credit Loss")
 st.pyplot(fig)
+
+# Sector analysis
+def sector(name: str) -> str:
+    n = str(name).upper()
+    if any(w in n for w in ["ROAD","HIGHWAY","RAIL","TRANSPORT"]): return "Transport & Infrastructure"
+    if any(w in n for w in ["POWER","ENERGY","SOLAR"]): return "Energy & Power"
+    if any(w in n for w in ["WATER","IRRIGATION","DAM"]): return "Water & Irrigation"
+    if any(w in n for w in ["URBAN","CITY","HOUSING"]): return "Urban Development & Housing"
+    if any(w in n for w in ["AGRI","FARM","RURAL"]): return "Agriculture & Rural Development"
+    if any(w in n for w in ["HEALTH","COVID","NUTRITION"]): return "Health & Social Protection"
+    if any(w in n for w in ["EDUCATION","SCHOOL","TRAINING"]): return "Education & Skills"
+    if any(w in n for w in ["FINANCE","MSME","BANK"]): return "Finance & Industry"
+    if any(w in n for w in ["GOVERNANCE","SERVICE DELIVERY"]): return "Governance & Policy Reform"
+    if any(w in n for w in ["CLIMATE","RESILIENT"]): return "Environment & Climate"
+    if any(w in n for w in ["INNOVATE","TECH","ICT","DIGITAL"]): return "Technology & Innovation"
+    if any(w in n for w in ["DISASTER","RECOVERY","RELIEF"]): return "Disaster Recovery & Emergency"
+    return "Others"
+
+merged_df["sector"] = merged_df["project_name"].apply(sector)
+sector_ecl = merged_df.groupby("sector").apply(lambda x: (x['borrowers_obligation_ususd']*usd_to_inr*x['default_flag']).sum()).reset_index()
+sector_ecl.columns = ["Sector","Total_ECL_INR"]
+
+fig2, ax2 = plt.subplots(figsize=(12,6))
+sns.barplot(data=sector_ecl, x="Total_ECL_INR", y="Sector", palette="viridis", ax=ax2)
+ax2.set_xlabel("Total ECL (INR)")
+ax2.set_ylabel("Sector")
+st.pyplot(fig2)
+
+# --------------------------
+# Stress Testing
+# --------------------------
+st.header("Stress Testing Scenario")
+stress_factor = st.slider("PD Stress Factor", 1.0, 3.0, 1.2, 0.05)
+
+stress_ecl_df = ecl_df.copy()
+stress_ecl_df['PD_stress'] = stress_ecl_df['PD'] * stress_factor
+stress_ecl_df['ECL_stress_INR'] = stress_ecl_df['EAD_INR'] * stress_ecl_df['LGD'] * stress_ecl_df['PD_stress']
+
+ecl_compare_df = ecl_df[['project_name','ECL_INR']].merge(
+    stress_ecl_df[['project_name','ECL_stress_INR']],
+    on='project_name'
+).sort_values('ECL_stress_INR', ascending=False)
+
+st.subheader("Top 20 Projects by Stressed ECL")
+st.write(ecl_compare_df.head(20))
+
+fig3, ax3 = plt.subplots(figsize=(12,6))
+ax3.barh(ecl_compare_df.head(15)["project_name"], ecl_compare_df.head(15)["ECL_stress_INR"]/1e9, color="darkorange")
+ax3.invert_yaxis()
+ax3.set_xlabel("Stressed ECL (INR Billion)")
+ax3.set_ylabel("Project")
+ax3.set_title("Top 15 Projects by Stressed ECL")
+st.pyplot(fig3)
+
+st.success("ECL and stress testing calculations completed!")
