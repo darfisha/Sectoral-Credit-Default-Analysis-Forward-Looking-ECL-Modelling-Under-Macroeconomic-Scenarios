@@ -1,263 +1,165 @@
-# -*- coding: utf-8 -*-
-"""Streamlit Credit Risk Analysis App."""
-
 import streamlit as st
 import pandas as pd
-import numpy as np
-import os
-import matplotlib.pyplot as plt
-import seaborn as sns
-from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler
-from sklearn.ensemble import RandomForestClassifier
-from xgboost import XGBClassifier
+from sklearn.impute import SimpleImputer
 from catboost import CatBoostClassifier
-from sklearn.metrics import roc_auc_score
-import gdown
+from xgboost import XGBClassifier
+from sklearn.ensemble import RandomForestClassifier
 
-st.set_page_config(layout="wide", page_title="Credit Risk Analysis")
-
-# ===============================
-# Data Loading & Preprocessing
-# ===============================
-@st.cache_data
-def load_and_preprocess_data():
-    file_id = "1MVW1amhh9k3ksDsJkRo9ELvEwRplG0r2"   # replace with your dataset file id if needed
-    url = f"https://drive.google.com/uc?id={file_id}"
-    output = "credit_risk.csv"
-
-    if not os.path.exists(output):
-        gdown.download(url, output, quiet=False)
-
-    df = pd.read_csv(output, low_memory=False)
-
-    # clean column names
-    df.columns = [
-        col.strip().lower().replace(" ", "_").replace("/", "_")
-        .replace("(", "").replace(")", "").replace("$", "usd")
-        .replace("'", "").replace(".", "")
-        for col in df.columns
-    ]
-
-    # filter India
-    india_df = df[df['country___economy'].str.strip() == 'India'].copy()
-    india_df.drop(columns=['currency_of_commitment'], inplace=True, errors='ignore')
-
-    # numeric handling
-    numeric_cols_raw = [
-        'interest_rate', 'original_principal_amount_ususd', 'cancelled_amount_ususd',
-        'undisbursed_amount_ususd', 'disbursed_amount_ususd', 'repaid_to_ibrd_ususd',
-        'due_to_ibrd_ususd','exchange_adjustment_ususd',
-        'borrowers_obligation_ususd', 'loans_held_ususd'
-    ]
-    india_df[numeric_cols_raw] = india_df[numeric_cols_raw].apply(pd.to_numeric, errors='coerce')
-    for col in numeric_cols_raw:
-        india_df[col] = india_df[col].apply(lambda x: np.nan if x < 0 else x)
-
-    # default flag
-    def encode_default_balanced(status, disbursed_amount):
-        if not isinstance(status, str): return 1
-        status = status.strip().upper()
-        if status in ["FULLY REPAID", "SIGNED", "APPROVED", "DISBURSING"]: return 0
-        if status in ["REPAYING", "DISBURSED", "DISBURSING&REPAYING", "FULLY DISBURSED"]: return 1
-        if status in ["CANCELLED", "FULLY CANCELLED"]:
-            return 1 if disbursed_amount and disbursed_amount > 0 else 0
-        return 1
-    india_df["default_flag"] = india_df.apply(
-        lambda row: encode_default_balanced(row["loan_status"], row["disbursed_amount_ususd"]), axis=1
-    )
-
-    # feature engineering
-    india_df["repayment_ratio"] = (
-        india_df["repaid_to_ibrd_ususd"] / india_df["disbursed_amount_ususd"]
-    ).replace([np.inf, -np.inf], np.nan).fillna(0)
-
-    india_df["loan_to_gdp_growth_ratio"] = (
-        india_df["original_principal_amount_ususd"] / 1e9
-    ).replace([np.inf, -np.inf], np.nan).fillna(0)
-
-    return india_df
-
-# ===============================
-# Train Models
-# ===============================
+# -----------------------------
+# 1️⃣ Train models (cached)
+# -----------------------------
 @st.cache_resource
 def train_models(df):
-    numeric_cols = [
-        'interest_rate', 'original_principal_amount_ususd', 'cancelled_amount_ususd',
-        'undisbursed_amount_ususd', 'disbursed_amount_ususd', 'repaid_to_ibrd_ususd',
-        'due_to_ibrd_ususd','exchange_adjustment_ususd',
-        'borrowers_obligation_ususd', 'loans_held_ususd',
-        "repayment_ratio", "loan_to_gdp_growth_ratio"
-    ]
+    # Select numeric features automatically
+    features = df.select_dtypes(include='number').columns.drop('default_flag').tolist()
+    X = df[features].values
+    y = df['default_flag'].values
 
-    train_df = df[df["year"] <= 2020].copy()
-    test_df  = df[df["year"] >= 2023].copy()
-
-    X_train = train_df[numeric_cols].values
-    y_train = train_df["default_flag"].values
-    X_test  = test_df[numeric_cols].values if not test_df.empty else np.empty((0, len(numeric_cols)))
-    y_test  = test_df["default_flag"].values if not test_df.empty else np.array([])
-
-    imputer = SimpleImputer(strategy="mean")
-    X_train_imputed = imputer.fit_transform(X_train)
-    X_test_imputed  = imputer.transform(X_test) if X_test.size else X_test
+    # Preprocessing
+    imputer = SimpleImputer(strategy='mean')
     scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train_imputed)
-    X_test_scaled  = scaler.transform(X_test_imputed) if X_test_imputed.size else X_test_imputed
+    X_scaled = scaler.fit_transform(imputer.fit_transform(X))
+
+    # CatBoost
+    catboost_model = CatBoostClassifier(iterations=100, verbose=0)
+    catboost_model.fit(X_scaled, y)
+
+    # XGBoost
+    xgb_model = XGBClassifier(use_label_encoder=False, eval_metric='logloss')
+    xgb_model.fit(X_scaled, y)
+
+    # RandomForest
+    rf_model = RandomForestClassifier(n_estimators=100, random_state=42)
+    rf_model.fit(X_scaled, y)
 
     models = {
-        "CatBoost": CatBoostClassifier(iterations=400, learning_rate=0.05, depth=6, verbose=0, random_state=42),
-        "XGBoost": XGBClassifier(n_estimators=400, learning_rate=0.05, max_depth=6,
-                                 subsample=0.8, colsample_bytree=0.8, eval_metric="logloss", random_state=42),
-        "RandomForest": RandomForestClassifier(n_estimators=300, max_depth=12,
-                                               min_samples_split=5, class_weight="balanced", random_state=42)
+        "CatBoost": {"model": catboost_model, "scaler": scaler, "imputer": imputer},
+        "XGBoost": {"model": xgb_model, "scaler": scaler, "imputer": imputer},
+        "RandomForest": {"model": rf_model, "scaler": scaler, "imputer": imputer}
     }
+    return models, features
 
-    trained_models = {}
-    for name, model in models.items():
-        model.fit(X_train_scaled, y_train)
-        y_prob = model.predict_proba(X_test_scaled)[:, 1] if y_test.size > 0 else [0]
-        auc = roc_auc_score(y_test, y_prob) if y_test.size > 0 else 0.0
-        trained_models[name] = {"model": model, "test_auc": auc,
-                                "scaler": scaler, "imputer": imputer}
-    return trained_models
-
-# ===============================
-# Add Predictions
-# ===============================
+# -----------------------------
+# 2️⃣ Predict function (cached)
+# -----------------------------
 @st.cache_data
-def get_all_data_with_predictions(df):
-    numeric_cols = [
-        'interest_rate', 'original_principal_amount_ususd', 'cancelled_amount_ususd',
-        'undisbursed_amount_ususd', 'disbursed_amount_ususd', 'repaid_to_ibrd_ususd',
-        'due_to_ibrd_ususd','exchange_adjustment_ususd',
-        'borrowers_obligation_ususd', 'loans_held_ususd',
-        "repayment_ratio", "loan_to_gdp_growth_ratio"
-    ]
-
-    models = train_models(df)
-    model_info = models["CatBoost"]
-    catboost_model = model_info["model"]
-    scaler = model_info["scaler"]
-    imputer = model_info["imputer"]
-
-    X_all = df[numeric_cols].values
-    X_all_scaled = scaler.transform(imputer.transform(X_all))
-
-    df = df.copy()
-    df['default_prob'] = catboost_model.predict_proba(X_all_scaled)[:, 1]
-    return df
-
-# ===============================
-# Main App
-# ===============================
-st.markdown('<h1 class="main-header">Credit Risk Analysis & Prediction 📊</h1>', unsafe_allow_html=True)
-
-with st.spinner("Loading data and training models..."):
-    merged_df = load_and_preprocess_data()
-    trained_models = train_models(merged_df)
-    merged_df = get_all_data_with_predictions(merged_df)
-    st.success("Loading complete!")
-
-# Sidebar inputs
-st.sidebar.header("Input Features 🚀")
-input_features = {
-    'interest_rate': st.sidebar.number_input("Interest Rate", value=0.05, format="%.2f"),
-    'original_principal_amount_ususd': st.sidebar.number_input("Original Principal ($)", value=100_000_000, format="%d"),
-    'cancelled_amount_ususd': st.sidebar.number_input("Cancelled Amount ($)", value=0, format="%d"),
-    'undisbursed_amount_ususd': st.sidebar.number_input("Undisbursed Amount ($)", value=10_000_000, format="%d"),
-    'disbursed_amount_ususd': st.sidebar.number_input("Disbursed Amount ($)", value=90_000_000, format="%d"),
-    'repaid_to_ibrd_ususd': st.sidebar.number_input("Repaid to IBRD ($)", value=50_000_000, format="%d"),
-    'due_to_ibrd_ususd': st.sidebar.number_input("Due to IBRD ($)", value=10_000_000, format="%d"),
-    'exchange_adjustment_ususd': st.sidebar.number_input("Exchange Adjustment ($)", value=0, format="%d"),
-    'borrowers_obligation_ususd': st.sidebar.number_input("Borrower's Obligation ($)", value=40_000_000, format="%d"),
-    'loans_held_ususd': st.sidebar.number_input("Loans Held ($)", value=100_000_000, format="%d"),
-    'gdp_growth': st.sidebar.number_input("GDP Growth (%)", value=5.5, format="%.2f"),
-    'cpi_inflation': st.sidebar.number_input("CPI Inflation (%)", value=4.5, format="%.2f"),
-}
-selected_model_name = st.sidebar.selectbox(
-    "Select Prediction Model ✨",
-    list(trained_models.keys()),
-    index=0
-)
-
-# Tabs
-tab1, tab2, tab3 = st.tabs(["Individual Prediction", "Portfolio Analysis", "Stress Testing"])
-
-# -------------------------------
-# Tab 1 – Individual Prediction
-# -------------------------------
-with tab1:
-    st.header("Individual Project Prediction")
-    model_info = trained_models[selected_model_name]
+def predict(df, model_name):
+    models, features = train_models(df)
+    model_info = models[model_name]
     model = model_info["model"]
     scaler = model_info["scaler"]
     imputer = model_info["imputer"]
 
-    # preprocess input
-    input_df = pd.DataFrame([input_features])
-    input_df["repayment_ratio"] = (
-        input_df["repaid_to_ibrd_ususd"] / input_df["disbursed_amount_ususd"]
-    ).replace([np.inf, -np.inf], np.nan).fillna(0)
-    input_df["loan_to_gdp_growth_ratio"] = (
-        input_df["original_principal_amount_ususd"] / (input_df["gdp_growth"] * 1e9)
-    ).replace([np.inf, -np.inf], np.nan).fillna(0)
+    X_all = df[features].values
+    X_all_scaled = scaler.transform(imputer.transform(X_all))
 
-    input_features_list = input_df.values[0]
-    input_imputed = imputer.transform([input_features_list])
-    input_scaled = scaler.transform(input_imputed)
-    pd_prob = model.predict_proba(input_scaled)[0, 1]
+    df = df.copy()
+    df['default_prob'] = model.predict_proba(X_all_scaled)[:, 1]
 
-    # ECL
-    usd_to_inr = 83
-    LGD = 0.45
-    EAD_INR = input_features['borrowers_obligation_ususd'] * usd_to_inr
-    ECL_project = EAD_INR * LGD * pd_prob
+    # Example ECL calculation
+    if 'original_principal_amount_ususd' in df.columns:
+        df['ECL'] = df['default_prob'] * df['original_principal_amount_ususd']
+    else:
+        df['ECL'] = df['default_prob']
 
-    st.metric("Probability of Default (PD)", f"{pd_prob:.2%}")
-    st.metric("Expected Credit Loss (ECL)", f"₹ {ECL_project:,.2f}")
+    # Example sector assignment
+    if 'Sector' not in df.columns:
+        df['Sector'] = "Sector_" + (df.index % 3 + 1).astype(str)
 
-# -------------------------------
-# Tab 2 – Portfolio Analysis
-# -------------------------------
-with tab2:
-    st.header("Portfolio & Sectoral Analysis")
+    sectoral_pd = df.groupby('Sector')['default_prob'].mean().reset_index()
+    sectoral_ecl = df.groupby('Sector')['ECL'].sum().reset_index()
 
-    usd_to_inr = 83
-    merged_df['borrowers_obligation_inr'] = merged_df['borrowers_obligation_ususd'] * usd_to_inr
-    merged_df['repaid_to_ibrd_inr'] = merged_df['repaid_to_ibrd_ususd'] * usd_to_inr
-    merged_df['LGD'] = ((merged_df['borrowers_obligation_inr'] - merged_df['repaid_to_ibrd_inr']) /
-                        merged_df['borrowers_obligation_inr']).fillna(0)
+    return df, sectoral_pd, sectoral_ecl, features
 
-    ecl_df = merged_df.groupby('project_name').apply(
-        lambda x: pd.Series({
-            'EAD_INR': x['borrowers_obligation_inr'].sum(),
-            'PD': x['default_prob'].mean(),
-            'LGD': (x['LGD'] * x['borrowers_obligation_inr']).sum() / x['borrowers_obligation_inr'].sum()
-                    if x['borrowers_obligation_inr'].sum() > 0 else 0,
-        })
-    ).reset_index()
-    ecl_df['ECL_INR'] = ecl_df['EAD_INR'] * ecl_df['LGD'] * ecl_df['PD']
+# -----------------------------
+# 3️⃣ Streamlit App Layout
+# -----------------------------
+st.sidebar.title("Navigation")
+page = st.sidebar.radio("Go to", ["Homepage", "Model Selection", "Feature Input & Prediction", "Sectoral Analysis", "Stress Testing"])
 
-    st.subheader("Top 15 Projects by ECL")
-    st.dataframe(ecl_df.sort_values("ECL_INR", ascending=False).head(15))
+# Load your dataset
+merged_df = pd.read_csv("your_merged_file.csv")
 
-# -------------------------------
-# Tab 3 – Stress Testing
-# -------------------------------
-with tab3:
-    st.header("Stress Testing")
+# -----------------------------
+# Homepage
+# -----------------------------
+if page == "Homepage":
+    st.title("Credit Risk Analysis & ECL Modelling")
+    st.markdown("""
+        This web app allows you to:
+        - Evaluate Project-Level and Sectoral PD
+        - Compute Expected Credit Losses (ECL)
+        - Perform sectoral stress testing
+        - Compare CatBoost, XGBoost, and RandomForest predictions
+    """)
+    st.write("Dataset preview:")
+    st.dataframe(merged_df.head())
 
-    beta_gdp = 0.02
-    beta_cpi = 0.01
-    delta_gdp = st.number_input("GDP Growth Shock (%)", value=-3.0, step=0.5)
-    delta_cpi = st.number_input("CPI Inflation Shock (%)", value=2.0, step=0.5)
+# -----------------------------
+# Model Selection
+# -----------------------------
+elif page == "Model Selection":
+    st.title("Select ML Model")
+    model_name = st.selectbox("Choose model", ["CatBoost", "XGBoost", "RandomForest"])
+    st.write(f"You selected **{model_name}**.")
 
-    ecl_df["pd_stressed"] = ecl_df["PD"] + (beta_gdp * delta_gdp) + (beta_cpi * delta_cpi)
-    ecl_df["pd_stressed"] = ecl_df["pd_stressed"].clip(0, 1)
+# -----------------------------
+# Feature Input & Prediction (Dynamic)
+# -----------------------------
+elif page == "Feature Input & Prediction":
+    st.title("Dynamic Feature Input for Prediction")
+    _, _, _, features = predict(merged_df, "CatBoost")  # just to get features
+    features_input = {}
 
-    ecl_df['ECL_stressed'] = ecl_df['EAD_INR'] * ecl_df['LGD'] * ecl_df['pd_stressed']
+    with st.form("feature_form"):
+        st.write("Enter feature values:")
+        for feature in features:
+            features_input[feature] = st.number_input(feature, value=float(merged_df[feature].mean()))
+        model_name = st.selectbox("Select model", ["CatBoost", "XGBoost", "RandomForest"])
+        submit = st.form_submit_button("Predict")
 
-    st.subheader("Project-level ECL (Baseline vs Stressed)")
-    st.dataframe(ecl_df[['project_name', 'ECL_INR', 'ECL_stressed']].sort_values('ECL_stressed', ascending=False).head(15))
+    if submit:
+        input_df = pd.DataFrame([features_input])
+        full_df = pd.concat([merged_df, input_df], ignore_index=True)
+        preds_df, _, _, _ = predict(full_df, model_name)
+        st.write("Predicted default probability for input:")
+        st.write(preds_df.tail(1)[['default_prob']])
+
+# -----------------------------
+# Sectoral Analysis
+# -----------------------------
+elif page == "Sectoral Analysis":
+    st.title("Sectoral PD & ECL")
+    model_name = st.selectbox("Select model", ["CatBoost", "XGBoost", "RandomForest"])
+    preds_df, sectoral_pd, sectoral_ecl, _ = predict(merged_df, model_name)
+    st.subheader("Sectoral PD")
+    st.dataframe(sectoral_pd)
+    st.subheader("Sectoral ECL")
+    st.dataframe(sectoral_ecl)
+
+# -----------------------------
+# Stress Testing Simulation
+# -----------------------------
+elif page == "Stress Testing":
+    st.title("Stress Testing Scenario Simulation")
+    model_name = st.selectbox("Select model", ["CatBoost", "XGBoost", "RandomForest"])
+    preds_df, _, _, features = predict(merged_df, model_name)
+
+    st.write("Define stress scenario (% change on features):")
+    scenario_changes = {}
+    for feature in features:
+        scenario_changes[feature] = st.slider(f"{feature} change (%)", -50, 100, 0)
+
+    if st.button("Apply Stress Scenario"):
+        stressed_df = preds_df.copy()
+        for feature, change in scenario_changes.items():
+            stressed_df[feature] = stressed_df[feature] * (1 + change / 100)
+
+        stressed_df, sectoral_pd, sectoral_ecl, _ = predict(stressed_df, model_name)
+        st.subheader("Sectoral PD under stress scenario")
+        st.dataframe(sectoral_pd)
+        st.subheader("Sectoral ECL under stress scenario")
+        st.dataframe(sectoral_ecl)
+        st.write("Project-level PD (first 10 rows):")
+        st.dataframe(stressed_df[['default_prob']].head(10))
