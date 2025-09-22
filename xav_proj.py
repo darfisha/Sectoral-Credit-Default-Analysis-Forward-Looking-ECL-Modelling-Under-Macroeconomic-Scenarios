@@ -7,29 +7,36 @@ from xgboost import XGBClassifier
 from sklearn.ensemble import RandomForestClassifier
 
 # -----------------------------
-# 1️⃣ Train models (cached)
+# 1️⃣ Load CSV from GitHub
+# -----------------------------
+GITHUB_CSV_URL = "https://raw.githubusercontent.com/<username>/<repo>/<branch>/merged_df.csv"
+
+@st.cache_data
+def load_data(url):
+    df = pd.read_csv(url)
+    return df
+
+merged_df = load_data(GITHUB_CSV_URL)
+
+# -----------------------------
+# 2️⃣ Train models (cached)
 # -----------------------------
 @st.cache_resource
 def train_models(df):
-    # Select numeric features automatically
     features = df.select_dtypes(include='number').columns.drop('default_flag').tolist()
     X = df[features].values
     y = df['default_flag'].values
 
-    # Preprocessing
     imputer = SimpleImputer(strategy='mean')
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(imputer.fit_transform(X))
 
-    # CatBoost
     catboost_model = CatBoostClassifier(iterations=100, verbose=0)
     catboost_model.fit(X_scaled, y)
 
-    # XGBoost
     xgb_model = XGBClassifier(use_label_encoder=False, eval_metric='logloss')
     xgb_model.fit(X_scaled, y)
 
-    # RandomForest
     rf_model = RandomForestClassifier(n_estimators=100, random_state=42)
     rf_model.fit(X_scaled, y)
 
@@ -41,7 +48,7 @@ def train_models(df):
     return models, features
 
 # -----------------------------
-# 2️⃣ Predict function (cached)
+# 3️⃣ Predict function (cached)
 # -----------------------------
 @st.cache_data
 def predict(df, model_name):
@@ -57,13 +64,11 @@ def predict(df, model_name):
     df = df.copy()
     df['default_prob'] = model.predict_proba(X_all_scaled)[:, 1]
 
-    # Example ECL calculation
     if 'original_principal_amount_ususd' in df.columns:
         df['ECL'] = df['default_prob'] * df['original_principal_amount_ususd']
     else:
         df['ECL'] = df['default_prob']
 
-    # Example sector assignment
     if 'Sector' not in df.columns:
         df['Sector'] = "Sector_" + (df.index % 3 + 1).astype(str)
 
@@ -73,13 +78,10 @@ def predict(df, model_name):
     return df, sectoral_pd, sectoral_ecl, features
 
 # -----------------------------
-# 3️⃣ Streamlit App Layout
+# 4️⃣ Streamlit Layout
 # -----------------------------
 st.sidebar.title("Navigation")
 page = st.sidebar.radio("Go to", ["Homepage", "Model Selection", "Feature Input & Prediction", "Sectoral Analysis", "Stress Testing"])
-
-# Load your dataset
-merged_df = pd.read_csv("your_merged_file.csv")
 
 # -----------------------------
 # Homepage
@@ -109,7 +111,7 @@ elif page == "Model Selection":
 # -----------------------------
 elif page == "Feature Input & Prediction":
     st.title("Dynamic Feature Input for Prediction")
-    _, _, _, features = predict(merged_df, "CatBoost")  # just to get features
+    _, _, _, features = predict(merged_df, "CatBoost")  # get features
     features_input = {}
 
     with st.form("feature_form"):
