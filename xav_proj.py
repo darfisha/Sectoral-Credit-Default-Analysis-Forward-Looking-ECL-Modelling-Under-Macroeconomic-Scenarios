@@ -19,7 +19,7 @@ def load_data(url):
 merged_df = load_data(RAW_URL)
 
 # Ensure ProjectName exists
-merged_df['ProjectName'] = merged_df['ProjectName'].fillna("Unknown Project")
+merged_df['project_name'] = merged_df['project_name'].fillna("Unknown Project")
 
 # -----------------------------
 # 2️⃣ Dynamic sector assignment (based on project attributes)
