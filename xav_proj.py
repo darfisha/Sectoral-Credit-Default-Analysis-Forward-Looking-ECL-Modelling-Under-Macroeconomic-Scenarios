@@ -32,8 +32,8 @@ def load_and_preprocess_data():
     output = "credit_risk.csv"
 
     if not os.path.exists(output):
-        st.info("Downloading file from Google Drive...")
-        gdown.download(url, output, quiet=False)
+        with st.spinner("Downloading credit risk data..."):
+            gdown.download(url, output, quiet=True)
     
     date_cols = [
         "Agreement Signing Date", "Board Approval Date", "Closed Date (Most Recent)",
@@ -154,6 +154,31 @@ def train_models(df):
         trained_models[name] = {"model": model, "test_auc": auc, "scaler": scaler, "imputer": imputer}
     return trained_models
 
+@st.cache_data
+def get_all_data_with_predictions(df, models):
+    """Predicts default probability for all projects using the best model."""
+    numeric_cols = [
+        'interest_rate', 'original_principal_amount_ususd', 'cancelled_amount_ususd',
+        'undisbursed_amount_ususd', 'disbursed_amount_ususd', 'repaid_to_ibrd_ususd',
+        'due_to_ibrd_ususd','exchange_adjustment_ususd',
+        'borrowers_obligation_ususd', 'loans_held_ususd',
+        "repayment_ratio", "loan_to_gdp_growth_ratio"
+    ]
+    
+    # Use CatBoost as it's typically the best performer
+    model_info = models["CatBoost"]
+    catboost_model = model_info["model"]
+    scaler = model_info["scaler"]
+    imputer = model_info["imputer"]
+    
+    X_all = df[numeric_cols].values
+    X_all_scaled = scaler.transform(imputer.transform(X_all))
+
+    # Predict probability of default (class 1)
+    df['default_prob'] = catboost_model.predict_proba(X_all_scaled)[:, 1]
+    
+    return df
+
 # Define sector classification function
 def sector(name: str) -> str:
     n = str(name).upper()
@@ -175,12 +200,18 @@ def sector(name: str) -> str:
 
 st.title("Credit Risk Analysis & Prediction")
 
-# Load and preprocess data (cached)
-merged_df = load_and_preprocess_data()
-
-# Train models (cached)
-trained_models = train_models(merged_df)
-
+# Use a spinner and progress bar for loading
+with st.spinner("Loading data and training models..."):
+    progress_bar = st.progress(0, text="Loading data...")
+    merged_df = load_and_preprocess_data()
+    progress_bar.progress(50, text="Training models...")
+    trained_models = train_models(merged_df)
+    progress_bar.progress(90, text="Predicting default probabilities...")
+    merged_df = get_all_data_with_predictions(merged_df, trained_models)
+    progress_bar.progress(100, text="App is ready!")
+    st.success("Loading complete!")
+    st.balloons()
+    
 # --- Sidebar for User Inputs and Model Selection ---
 st.sidebar.header("Input Features")
 
