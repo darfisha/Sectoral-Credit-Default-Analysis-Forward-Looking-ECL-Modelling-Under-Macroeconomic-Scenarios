@@ -17,6 +17,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import RandomForestClassifier
 from xgboost import XGBClassifier
 from catboost import CatBoostClassifier
+from sklearn.metrics import roc_auc_score
 import gdown
 
 st.set_page_config(layout="wide", page_title="Credit Risk Analysis")
@@ -149,7 +150,7 @@ def train_models(df):
     for name, model in models.items():
         model.fit(X_train_scaled, y_train)
         y_prob = model.predict_proba(X_test_scaled)[:, 1] if hasattr(model, "predict_proba") else model.decision_function(X_test_scaled)
-        auc = roc_auc_score(y_test, y_prob)
+        auc = roc_auc_score(y_test, y_prob) if y_test.size > 0 else 0.0
         trained_models[name] = {"model": model, "test_auc": auc, "scaler": scaler, "imputer": imputer}
     return trained_models
 
