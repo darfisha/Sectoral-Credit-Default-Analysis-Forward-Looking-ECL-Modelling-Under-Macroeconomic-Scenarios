@@ -18,12 +18,18 @@ def load_data(url):
 
 merged_df = load_data(RAW_URL)
 
+# Ensure Project and Sector columns exist
+if 'ProjectName' not in merged_df.columns:
+    merged_df['ProjectName'] = ["Project_" + str(i) for i in range(len(merged_df))]
+if 'Sector' not in merged_df.columns:
+    merged_df['Sector'] = ["Sector_" + str(i % 3 + 1) for i in range(len(merged_df))]
+
 # -----------------------------
 # 2️⃣ Train models once (cached)
 # -----------------------------
 @st.cache_resource
 def train_models(df):
-    # numeric features only
+    # numeric features only, exclude target
     features = df.select_dtypes(include='number').columns.drop('default_flag').tolist()
     X = df[features].values
     y = df['default_flag'].values
@@ -48,7 +54,7 @@ def train_models(df):
     }
     return models, features
 
-# Train once at startup
+# Train once
 models, features = train_models(merged_df)
 
 # -----------------------------
@@ -72,9 +78,11 @@ def predict_input(input_df, model_name):
     else:
         input_df['ECL'] = input_df['default_prob']
 
-    # Sector assignment
+    # Use actual ProjectName and Sector from the input_df if present
+    if 'ProjectName' not in input_df.columns:
+        input_df['ProjectName'] = ["Project_" + str(i) for i in range(len(input_df))]
     if 'Sector' not in input_df.columns:
-        input_df['Sector'] = "Sector_" + (input_df.index % 3 + 1).astype(str)
+        input_df['Sector'] = ["Sector_" + str(i % 3 + 1) for i in range(len(input_df))]
 
     sectoral_pd = input_df.groupby('Sector')['default_prob'].mean().reset_index()
     sectoral_ecl = input_df.groupby('Sector')['ECL'].sum().reset_index()
@@ -121,14 +129,19 @@ elif page == "Feature Input & Prediction":
         st.write("Enter feature values:")
         for feature in features:
             features_input[feature] = st.number_input(feature, value=float(merged_df[feature].mean()))
+        # Optionally input project name and sector
+        project_name = st.text_input("Project Name", value="New Project")
+        sector_name = st.text_input("Sector", value="New Sector")
         model_name = st.selectbox("Select model", ["CatBoost", "XGBoost", "RandomForest"])
         submit = st.form_submit_button("Predict")
 
     if submit:
         input_df = pd.DataFrame([features_input])
+        input_df['ProjectName'] = project_name
+        input_df['Sector'] = sector_name
         preds_df, _, _ = predict_input(input_df, model_name)
         st.write("Predicted default probability for input:")
-        st.dataframe(preds_df[['default_prob', 'ECL']])
+        st.dataframe(preds_df[['ProjectName', 'Sector', 'default_prob', 'ECL']])
 
 # -----------------------------
 # Sectoral Analysis
@@ -141,6 +154,8 @@ elif page == "Sectoral Analysis":
     st.dataframe(sectoral_pd)
     st.subheader("Sectoral ECL")
     st.dataframe(sectoral_ecl)
+    st.subheader("Project-level PD & ECL")
+    st.dataframe(preds_df[['ProjectName', 'Sector', 'default_prob', 'ECL']].head(10))
 
 # -----------------------------
 # Stress Testing Simulation
@@ -148,7 +163,6 @@ elif page == "Sectoral Analysis":
 elif page == "Stress Testing":
     st.title("Stress Testing Scenario Simulation")
     model_name = st.selectbox("Select model", ["CatBoost", "XGBoost", "RandomForest"])
-    _, _, _ = predict_input(merged_df, model_name)  # just for features
 
     st.write("Define stress scenario (% change on features):")
     scenario_changes = {}
@@ -166,4 +180,4 @@ elif page == "Stress Testing":
         st.subheader("Sectoral ECL under stress scenario")
         st.dataframe(sectoral_ecl)
         st.write("Project-level PD (first 10 rows):")
-        st.dataframe(stressed_df[['default_prob']].head(10))
+        st.dataframe(stressed_df[['ProjectName', 'Sector', 'default_prob', 'ECL']].head(10))
