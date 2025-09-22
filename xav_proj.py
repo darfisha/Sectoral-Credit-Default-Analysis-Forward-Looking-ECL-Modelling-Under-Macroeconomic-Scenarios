@@ -5,42 +5,79 @@ from sklearn.impute import SimpleImputer
 from catboost import CatBoostRegressor
 from xgboost import XGBRegressor
 from sklearn.ensemble import RandomForestRegressor
+import os
+import gdown
 
 # -----------------------------
-# 1️⃣ Load CSV
+# 1️⃣ Load Data with Caching
 # -----------------------------
-RAW_URL = "https://raw.githubusercontent.com/darfisha/Sectoral-Credit-Default-Analysis-Forward-Looking-ECL-Modelling-Under-Macroeconomic-Scenarios/main/merged_df.csv"
-
 @st.cache_data
-def load_data(url):
-    df = pd.read_csv(url)
+def load_and_preprocess_data():
+    """Loads and preprocesses the credit risk dataset from the local file."""
+    file_path = "merged_df.csv"
+    if not os.path.exists(file_path):
+        st.error("The 'merged_df.csv' file was not found. Please make sure it is in the same directory as the app.")
+        return pd.DataFrame()
+    
+    try:
+        df = pd.read_csv(file_path, low_memory=False)
+    except Exception as e:
+        st.error(f"Error loading data from file: {e}")
+        return pd.DataFrame()
+
+    # Robustly check for and rename project name column
+    if 'project_name' in df.columns:
+        df.rename(columns={'project_name': 'ProjectName'}, inplace=True)
+    elif 'ProjectName' not in df.columns:
+        st.error("The dataset must contain a 'project_name' or 'ProjectName' column.")
+        return pd.DataFrame()
+    
+    # Fill missing ProjectName values
+    df['ProjectName'] = df['ProjectName'].fillna("Unknown Project")
+
+    # Clean other columns if necessary (matching previous logic)
+    df.columns = [
+        col.strip().lower().replace(" ", "_").replace("/", "_").replace("(", "").replace(")", "").replace("$", "usd").replace("'", "").replace(".", "")
+        for col in df.columns
+    ]
+
+    # --- Dynamic sector assignment (based on project attributes) ---
+    def assign_sector(name: str) -> str:
+        n = str(name).upper()
+        if any(w in n for w in ["ROAD", "HIGHWAY", "RAIL", "TRANSPORT", "LOGISTICS", "CORRIDOR", "EDFC", "MITP"]): return "Transport & Infrastructure"
+        if any(w in n for w in ["POWER", "ENERGY", "SOLAR", "ELECTRIC", "DISTRIBUTION", "24X7"]): return "Energy & Power"
+        if any(w in n for w in ["WATER", "IRRIGATION", "DAM", "HYDRO", "BASIN", "WASSIP", "WBADMIP", "KSWMP", "DRIP", "KARN URB WTR", "WTR",  "APIIATP", "SHWSSP" ]): return "Water & Irrigation"
+        if any(w in n for w in ["URBAN", "CITY", "HOUSING", "MUNICIPAL", "TOURISM", "TNHHDP", "AMARAVATI", "SWACHH BHARAT"]): return "Urban Development & Housing"
+        if any(w in n for w in ["AGRI", "FARM", "RURAL", "LIVELIHOOD", "DAIRY", "FISHERIES", "COOPERATIVE", "JOHAR", "POCRA", "CHIRAAG", "TNRTP", "IAMP"]): return "Agriculture & Rural Development"
+        if any(w in n for w in ["HEALTH", "RSHDP", "COVID", "NUTRITION", "DISABILITY", "HSSP", "ICDS", "TB", "SNGRBP", "PHSPP", "EHSDP", "FSPP", "RESPONSIVE SOCIAL PROTECTION"]): return "Health & Social Protection"
+        if any(w in n for w in ["EDUCATION", "SCHOOL", "TRAINING", "SKILL", "UNIVERSITY", "WORKFORCE", "NAHEP", "STARS", "GOAL"]): return "Education & Skills"
+        if any(w in n for w in ["FINANCE", "MSME", "CREDIT", "BANK", "FISCAL", "PFM", "SAL", "DPL", "PFORR", "RAMP", "BFAIR", "PRIVATE FINANCING"]): return "Finance & Industry"
+        if any(w in n for w in ["ISGPP", "CAPABILITY", "GOVERNANCE", "SERVICE DELIVERY", "PSCEP", "SRESTHA", "G-ACRP", "CCP", "UCRRFP", "U-PREPARE"]): return "Governance & Policy Reform"
+        if any(w in n for w in ["CLIMATE", "RESILIENT", "LANDSCAPE", "REWARD", "CHALK", "ASSIST", "SMART", "IPSS-CRRA", "AIRBMP", "TRESP"]): return "Environment & Climate"
+        if any(w in n for w in ["INNOVATE", "TECH", "ICT", "DIGITAL", "SYSTEMS", "INCLUSION", "ASPIRE", "NECTAR", "INSPIRES", "DAKSH", "KERA"]): return "Technology & Innovation"
+        if any(w in n for w in ["DISASTER", "RECOVERY", "REHABILITATION", "RELIEF"]): return "Disaster Recovery & Emergency"
+        return "Others"
+
+    df['Sector'] = df['ProjectName'].apply(assign_sector)
+    
     return df
 
-merged_df = load_data(RAW_URL)
-
-# Ensure ProjectName exists
-merged_df['project_name'] = merged_df['project_name'].fillna("Unknown Project")
-
 # -----------------------------
-# 2️⃣ Dynamic sector assignment (based on project attributes)
-# -----------------------------
-def assign_sector(row):
-    # Replace this logic with your original Python file rules
-    if row['original_principal_amount_ususd'] > 1_000_000:
-        return "Sector_Large"
-    elif row['interest_rate'] > 5:
-        return "Sector_HighRate"
-    else:
-        return "Sector_Other"
-
-merged_df['Sector'] = merged_df.apply(assign_sector, axis=1)
-
-# -----------------------------
-# 3️⃣ Train models once (cached)
+# 2️⃣ Train models once (cached)
 # -----------------------------
 @st.cache_resource
 def train_models(df):
-    features = df.select_dtypes(include='number').columns.drop('default_flag').tolist()
+    features = df.select_dtypes(include='number').columns.tolist()
+    
+    # Filter out target variables to avoid data leakage
+    features_to_predict = ['default_flag', 'default_prob', 'ECL']
+    features = [f for f in features if f not in features_to_predict]
+    
+    # Handle case where default_flag column is missing
+    if 'default_flag' not in df.columns:
+        st.error("Missing 'default_flag' column in the dataset. Cannot train models.")
+        return {}, []
+
     X = df[features].values
     y = df['default_flag'].values
 
@@ -51,7 +88,7 @@ def train_models(df):
     cat_model = CatBoostRegressor(iterations=200, verbose=0)
     cat_model.fit(X_scaled, y)
 
-    xgb_model = XGBRegressor(n_estimators=200, eval_metric='rmse')
+    xgb_model = XGBRegressor(n_estimators=200, eval_metric='rmse', random_state=42)
     xgb_model.fit(X_scaled, y)
 
     rf_model = RandomForestRegressor(n_estimators=200, random_state=42)
@@ -64,12 +101,11 @@ def train_models(df):
     }
     return models, features
 
-models, features = train_models(merged_df)
-
 # -----------------------------
-# 4️⃣ Prediction function
+# 3️⃣ Prediction function
 # -----------------------------
-def predict_df(df, model_name):
+@st.cache_data
+def predict_df(df, model_name, features):
     model_info = models[model_name]
     model = model_info["model"]
     scaler = model_info["scaler"]
@@ -79,7 +115,9 @@ def predict_df(df, model_name):
     X_scaled = scaler.transform(imputer.transform(X))
 
     df = df.copy()
-    df['default_prob'] = model.predict(X_scaled)
+    df['default_prob'] = model.predict(X_scaled).clip(0, 1) # Ensure probabilities are between 0 and 1
+    
+    # The user's provided logic for ECL is simpler here:
     df['ECL'] = df['default_prob'] * df.get('original_principal_amount_ususd', 1)
 
     sectoral_pd = df.groupby('Sector')['default_prob'].mean().reset_index()
@@ -88,51 +126,64 @@ def predict_df(df, model_name):
     return df, sectoral_pd, sectoral_ecl
 
 # -----------------------------
-# 5️⃣ Streamlit Layout
+# 4️⃣ Streamlit Layout
 # -----------------------------
+st.title("Credit Risk Analysis & ECL Modelling 📈")
+
+merged_df = load_and_preprocess_data()
+if merged_df.empty:
+    st.stop()
+    
+models, features = train_models(merged_df)
+
 st.sidebar.title("Navigation")
 page = st.sidebar.radio("Go to", ["Homepage", "Model Selection", "Project-Level Prediction", "Sectoral Analysis", "Stress Testing"])
 
-# Homepage
+# --- Homepage ---
 if page == "Homepage":
-    st.title("Credit Risk Analysis & ECL Modelling")
-    st.write("Dataset preview:")
+    st.header("App Overview & Data Preview")
+    st.write("This app analyzes credit risk for projects, predicts default probabilities, and simulates financial stress scenarios.")
+    st.subheader("Dataset Preview")
+    st.write("Below are the first 5 rows of the dataset used for this analysis.")
     st.dataframe(merged_df.head())
+    st.write(f"Dataset Shape: {merged_df.shape[0]} rows, {merged_df.shape[1]} columns")
 
-# Model Selection
+# --- Model Selection ---
 elif page == "Model Selection":
-    st.title("Select Regression Model")
-    model_name = st.selectbox("Choose model", ["CatBoost", "XGBoost", "RandomForest"])
+    st.header("Select Regression Model")
+    model_name = st.selectbox("Choose a model for your analysis:", ["CatBoost", "XGBoost", "RandomForest"])
     st.write(f"Using model: **{model_name}**")
-
-# Project-Level Prediction
+    st.write("Each model has been pre-trained to predict the probability of default based on financial features.")
+    
+# --- Project-Level Prediction ---
 elif page == "Project-Level Prediction":
-    st.title("Project-Level Prediction")
-    model_name = st.selectbox("Select model", ["CatBoost", "XGBoost", "RandomForest"])
-    preds_df, _, _ = predict_df(merged_df, model_name)
+    st.header("Project-Level Prediction & Analysis")
+    model_name = st.selectbox("Select a model to use for prediction:", ["CatBoost", "XGBoost", "RandomForest"])
+    preds_df, _, _ = predict_df(merged_df, model_name, features)
     st.subheader("Project-level PD & ECL")
-    st.dataframe(preds_df[['ProjectName', 'Sector', 'default_prob', 'ECL']].head(10))
+    st.write("The table below shows the top 10 projects by their predicted Probability of Default (PD) and Expected Credit Loss (ECL).")
+    st.dataframe(preds_df[['ProjectName', 'Sector', 'default_prob', 'ECL']].sort_values(by='ECL', ascending=False).head(10))
 
-# Sectoral Analysis
+# --- Sectoral Analysis ---
 elif page == "Sectoral Analysis":
-    st.title("Sectoral PD & ECL")
-    model_name = st.selectbox("Select model", ["CatBoost", "XGBoost", "RandomForest"])
-    _, sectoral_pd, sectoral_ecl = predict_df(merged_df, model_name)
-    st.subheader("Sectoral PD")
-    st.dataframe(sectoral_pd)
-    st.subheader("Sectoral ECL")
-    st.dataframe(sectoral_ecl)
+    st.header("Sectoral PD & ECL Analysis")
+    model_name = st.selectbox("Select a model to use for prediction:", ["CatBoost", "XGBoost", "RandomForest"])
+    _, sectoral_pd, sectoral_ecl = predict_df(merged_df, model_name, features)
+    st.subheader("Average Sectoral PD")
+    st.write("This table shows the average probability of default across different sectors.")
+    st.dataframe(sectoral_pd.sort_values(by='default_prob', ascending=False))
+    st.subheader("Total Sectoral ECL")
+    st.write("This table shows the total expected credit loss for each sector.")
+    st.dataframe(sectoral_ecl.sort_values(by='ECL', ascending=False))
 
-# Stress Testing
+# --- Stress Testing ---
 elif page == "Stress Testing":
-    st.title("Stress Testing Scenario Simulation")
-    model_name = st.selectbox("Select model", ["CatBoost", "XGBoost", "RandomForest"])
-
-    # Only 4 features for stress scenario
-    stress_features = ['interest_rate', 'original_principal_amount_ususd',
-                       'repaid_to_ibrd_ususd', 'due_to_ibrd_ususd']
-
-    st.write("Define stress scenario (% change on features):")
+    st.header("Stress Testing Scenario Simulation")
+    model_name = st.selectbox("Select a model to use for simulation:", ["CatBoost", "XGBoost", "RandomForest"])
+    st.write("Define a stress scenario by adjusting the percentage change for key features below. The app will then predict the new ECL.")
+    
+    # Define features for stress scenario
+    stress_features = ['interest_rate', 'original_principal_amount_ususd', 'repaid_to_ibrd_ususd', 'due_to_ibrd_ususd']
     scenario_changes = {}
     for feature in stress_features:
         scenario_changes[feature] = st.slider(f"{feature} change (%)", -50, 100, 0)
@@ -140,12 +191,14 @@ elif page == "Stress Testing":
     if st.button("Apply Stress Scenario"):
         stressed_df = merged_df.copy()
         for feature, change in scenario_changes.items():
-            stressed_df[feature] = stressed_df[feature] * (1 + change / 100)
+            if feature in stressed_df.columns:
+                stressed_df[feature] = stressed_df[feature] * (1 + change / 100)
 
-        stressed_df, sectoral_pd, sectoral_ecl = predict_df(stressed_df, model_name)
+        stressed_df, sectoral_pd, sectoral_ecl = predict_df(stressed_df, model_name, features)
+        
         st.subheader("Sectoral PD under stress scenario")
-        st.dataframe(sectoral_pd)
+        st.dataframe(sectoral_pd.sort_values(by='default_prob', ascending=False))
         st.subheader("Sectoral ECL under stress scenario")
-        st.dataframe(sectoral_ecl)
-        st.write("Project-level PD & ECL (first 10 rows)")
+        st.dataframe(sectoral_ecl.sort_values(by='ECL', ascending=False))
+        st.write("Project-level PD & ECL (first 10 rows) under the new scenario:")
         st.dataframe(stressed_df[['ProjectName', 'Sector', 'default_prob', 'ECL']].head(10))
