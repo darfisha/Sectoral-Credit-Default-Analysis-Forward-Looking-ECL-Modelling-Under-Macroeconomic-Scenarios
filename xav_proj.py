@@ -78,8 +78,9 @@ def train_models(df):
     }
     return models, features
 
+# Prediction function
 @st.cache_data
-def predict_single(input_df, model_name, features):
+def predict_df(input_df, model_name, features):
     model_info = models[model_name]
     model = model_info['model']
     scaler = model_info['scaler']
@@ -95,10 +96,9 @@ def predict_single(input_df, model_name, features):
 
     X_scaled = scaler.transform(imputer.transform(full_input.values))
     input_df['default_prob'] = model.predict(X_scaled).clip(0,1)
-    principal_col = 'original_principal_amount_ususd'
-    input_df['ecl'] = input_df['default_prob'] * input_df.get(principal_col, 1)
+    input_df['ecl'] = input_df['default_prob'] * input_df.get('original_principal_amount_ususd', 1)
 
-    return input_df[['sector', 'default_prob', 'ecl']]
+    return input_df
 
 # -----------------------------
 # 2️⃣ App Layout
@@ -111,33 +111,28 @@ if merged_df.empty:
 
 models, features = train_models(merged_df)
 
-# Navigation
 page = st.sidebar.radio("Navigation", ["Homepage", "Project Prediction", "Stress Testing"])
 
 # --- Homepage ---
 if page == "Homepage":
     st.header("App Overview")
     st.write("""
-    This app predicts **Probability of Default (PD)** and **Expected Credit Loss (ECL)** for projects.
-    You can enter project details, select a sector, and apply stress scenarios like CPI and GDP changes.
+    Predict **Probability of Default (PD)** and **Expected Credit Loss (ECL)** for projects.
+    Enter project details for individual prediction or simulate stress scenarios like CPI and GDP changes.
     """)
 
 # --- Project Prediction ---
 elif page == "Project Prediction":
     st.header("Project-Level Prediction")
 
-    # Select sector
     sector_options = merged_df['sector'].unique().tolist()
     selected_sector = st.selectbox("Select Project Sector", sector_options)
 
-    # Select model
     model_name = st.selectbox("Select Model", ["CatBoost", "XGBoost", "RandomForest"])
 
-    # User inputs
     interest_rate = st.number_input("Enter interest_rate", value=float(merged_df['interest_rate'].median()))
     principal = st.number_input("Enter original_principal_amount_ususd", value=float(merged_df['original_principal_amount_ususd'].median()))
 
-    # Create input DataFrame
     input_df = pd.DataFrame([{
         'interest_rate': interest_rate,
         'original_principal_amount_ususd': principal,
@@ -145,26 +140,23 @@ elif page == "Project Prediction":
     }])
 
     if st.button("Predict PD & ECL"):
-        result = predict_single(input_df, model_name, features)
+        result = predict_df(input_df, model_name, features)
         st.subheader("Prediction Result")
-        st.write(result)
+        st.write(result[['sector','default_prob','ecl']])
 
 # --- Stress Testing ---
 elif page == "Stress Testing":
     st.header("Stress Testing Simulation")
 
-    # Select model
     model_name = st.selectbox("Select Model", ["CatBoost", "XGBoost", "RandomForest"], key="stress_model")
 
-    # Stress inputs
     cpi_change = st.slider("CPI change (%)", -50, 100, 0)
     gdp_change = st.slider("GDP change (%)", -50, 100, 0)
 
-    # Apply stress: simple scaling on interest_rate and principal as proxy
     stressed_df = merged_df.copy()
     stressed_df['interest_rate'] = stressed_df['interest_rate'] * (1 + cpi_change / 100)
     stressed_df['original_principal_amount_ususd'] = stressed_df['original_principal_amount_ususd'] * (1 + gdp_change / 100)
 
-    stressed_df, _, _ = predict_single(stressed_df.head(10), model_name, features)  # show top 10 for simplicity
-    st.subheader("Top 10 Projects under Stress Scenario")
-    st.write(stressed_df[['ProjectName' if 'ProjectName' in stressed_df.columns else 'sector', 'default_prob', 'ecl']])
+    stressed_df = predict_df(stressed_df, model_name, features)
+    st.subheader("PD & ECL under Stress Scenario")
+    st.write(stressed_df[['ProjectName' if 'ProjectName' in stressed_df.columns else 'sector','default_prob','ecl']])
