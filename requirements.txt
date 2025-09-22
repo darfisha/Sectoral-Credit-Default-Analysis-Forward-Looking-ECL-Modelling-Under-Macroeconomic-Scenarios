@@ -11,5 +11,5 @@ xlrd
 python-dateutil
 catboost
 gdown
-
+shap
 
