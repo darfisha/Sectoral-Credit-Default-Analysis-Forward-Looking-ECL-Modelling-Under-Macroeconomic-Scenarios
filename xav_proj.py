@@ -19,21 +19,19 @@ def load_data(url):
 merged_df = load_data(RAW_URL)
 
 # -----------------------------
-# 2️⃣ Train models (cached)
+# 2️⃣ Train models once (cached)
 # -----------------------------
 @st.cache_resource
 def train_models(df):
-    # Select numeric features except the target
+    # numeric features only
     features = df.select_dtypes(include='number').columns.drop('default_flag').tolist()
     X = df[features].values
-    y = df['default_flag'].values  # probabilities between 0 and 1
+    y = df['default_flag'].values
 
-    # Preprocessing
     imputer = SimpleImputer(strategy='mean')
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(imputer.fit_transform(X))
 
-    # Regression models
     cat_model = CatBoostRegressor(iterations=200, verbose=0)
     cat_model.fit(X_scaled, y)
 
@@ -48,40 +46,40 @@ def train_models(df):
         "XGBoost": {"model": xgb_model, "scaler": scaler, "imputer": imputer},
         "RandomForest": {"model": rf_model, "scaler": scaler, "imputer": imputer}
     }
-
     return models, features
 
+# Train once at startup
+models, features = train_models(merged_df)
+
 # -----------------------------
-# 3️⃣ Prediction function (cached)
+# 3️⃣ Prediction function for new input
 # -----------------------------
-@st.cache_data
-def predict(df, model_name):
-    models, features = train_models(df)
+def predict_input(input_df, model_name):
     model_info = models[model_name]
     model = model_info["model"]
     scaler = model_info["scaler"]
     imputer = model_info["imputer"]
 
-    X_all = df[features].values
-    X_scaled = scaler.transform(imputer.transform(X_all))
+    X_input = input_df[features].values
+    X_scaled = scaler.transform(imputer.transform(X_input))
 
-    df = df.copy()
-    df['default_prob'] = model.predict(X_scaled)
+    input_df = input_df.copy()
+    input_df['default_prob'] = model.predict(X_scaled)
 
-    # ECL calculation (example)
-    if 'original_principal_amount_ususd' in df.columns:
-        df['ECL'] = df['default_prob'] * df['original_principal_amount_ususd']
+    # ECL calculation
+    if 'original_principal_amount_ususd' in input_df.columns:
+        input_df['ECL'] = input_df['default_prob'] * input_df['original_principal_amount_ususd']
     else:
-        df['ECL'] = df['default_prob']
+        input_df['ECL'] = input_df['default_prob']
 
-    # Example sector assignment
-    if 'Sector' not in df.columns:
-        df['Sector'] = "Sector_" + (df.index % 3 + 1).astype(str)
+    # Sector assignment
+    if 'Sector' not in input_df.columns:
+        input_df['Sector'] = "Sector_" + (input_df.index % 3 + 1).astype(str)
 
-    sectoral_pd = df.groupby('Sector')['default_prob'].mean().reset_index()
-    sectoral_ecl = df.groupby('Sector')['ECL'].sum().reset_index()
+    sectoral_pd = input_df.groupby('Sector')['default_prob'].mean().reset_index()
+    sectoral_ecl = input_df.groupby('Sector')['ECL'].sum().reset_index()
 
-    return df, sectoral_pd, sectoral_ecl, features
+    return input_df, sectoral_pd, sectoral_ecl
 
 # -----------------------------
 # 4️⃣ Streamlit Layout
@@ -117,7 +115,6 @@ elif page == "Model Selection":
 # -----------------------------
 elif page == "Feature Input & Prediction":
     st.title("Dynamic Feature Input for Prediction")
-    _, _, _, features = predict(merged_df, "CatBoost")  # get feature list
     features_input = {}
 
     with st.form("feature_form"):
@@ -129,10 +126,9 @@ elif page == "Feature Input & Prediction":
 
     if submit:
         input_df = pd.DataFrame([features_input])
-        full_df = pd.concat([merged_df, input_df], ignore_index=True)
-        preds_df, _, _, _ = predict(full_df, model_name)
+        preds_df, _, _ = predict_input(input_df, model_name)
         st.write("Predicted default probability for input:")
-        st.write(preds_df.tail(1)[['default_prob']])
+        st.dataframe(preds_df[['default_prob', 'ECL']])
 
 # -----------------------------
 # Sectoral Analysis
@@ -140,7 +136,7 @@ elif page == "Feature Input & Prediction":
 elif page == "Sectoral Analysis":
     st.title("Sectoral PD & ECL")
     model_name = st.selectbox("Select model", ["CatBoost", "XGBoost", "RandomForest"])
-    preds_df, sectoral_pd, sectoral_ecl, _ = predict(merged_df, model_name)
+    preds_df, sectoral_pd, sectoral_ecl = predict_input(merged_df, model_name)
     st.subheader("Sectoral PD")
     st.dataframe(sectoral_pd)
     st.subheader("Sectoral ECL")
@@ -152,7 +148,7 @@ elif page == "Sectoral Analysis":
 elif page == "Stress Testing":
     st.title("Stress Testing Scenario Simulation")
     model_name = st.selectbox("Select model", ["CatBoost", "XGBoost", "RandomForest"])
-    preds_df, _, _, features = predict(merged_df, model_name)
+    _, _, _ = predict_input(merged_df, model_name)  # just for features
 
     st.write("Define stress scenario (% change on features):")
     scenario_changes = {}
@@ -160,11 +156,11 @@ elif page == "Stress Testing":
         scenario_changes[feature] = st.slider(f"{feature} change (%)", -50, 100, 0)
 
     if st.button("Apply Stress Scenario"):
-        stressed_df = preds_df.copy()
+        stressed_df = merged_df.copy()
         for feature, change in scenario_changes.items():
             stressed_df[feature] = stressed_df[feature] * (1 + change / 100)
 
-        stressed_df, sectoral_pd, sectoral_ecl, _ = predict(stressed_df, model_name)
+        stressed_df, sectoral_pd, sectoral_ecl = predict_input(stressed_df, model_name)
         st.subheader("Sectoral PD under stress scenario")
         st.dataframe(sectoral_pd)
         st.subheader("Sectoral ECL under stress scenario")
