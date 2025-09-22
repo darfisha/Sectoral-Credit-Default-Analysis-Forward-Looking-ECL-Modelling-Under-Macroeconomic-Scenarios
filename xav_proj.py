@@ -9,7 +9,7 @@ from sklearn.ensemble import RandomForestClassifier
 # -----------------------------
 # 1️⃣ Load CSV from GitHub
 # -----------------------------
-GITHUB_CSV_URL = "https://raw.githubusercontent.com/<username>/<repo>/<branch>/merged_df.csv"
+GITHUB_CSV_URL = "https://github.com/darfisha/Sectoral-Credit-Default-Analysis-Forward-Looking-ECL-Modelling-Under-Macroeconomic-Scenarios/blob/main/merged_df.csv"
 
 @st.cache_data
 def load_data(url):
