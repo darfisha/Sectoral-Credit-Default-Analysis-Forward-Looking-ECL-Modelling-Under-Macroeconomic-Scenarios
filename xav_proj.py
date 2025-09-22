@@ -209,8 +209,8 @@ def train_models(df):
         trained_models[name] = {"model": model, "test_auc": auc, "scaler": scaler, "imputer": imputer}
     return trained_models
 
-@st.cache_resource
-def get_all_data_with_predictions(df, models):
+@st.cache_data
+def get_all_data_with_predictions(df):
     """Predicts default probability for all projects using the best model."""
     numeric_cols = [
         'interest_rate', 'original_principal_amount_ususd', 'cancelled_amount_ususd',
@@ -221,6 +221,7 @@ def get_all_data_with_predictions(df, models):
     ]
     
     # Use CatBoost as it's typically the best performer
+    models = train_models(df)
     model_info = models["CatBoost"]
     catboost_model = model_info["model"]
     scaler = model_info["scaler"]
@@ -263,7 +264,7 @@ with st.spinner("Loading data and training models..."):
     progress_bar.progress(50, text="Training models...")
     trained_models = train_models(merged_df)
     progress_bar.progress(90, text="Predicting default probabilities...")
-    merged_df = get_all_data_with_predictions(merged_df, trained_models)
+    merged_df = get_all_data_with_predictions(merged_df)
     progress_bar.progress(100, text="App is ready!")
     st.success("Loading complete!")
     st.balloons()
