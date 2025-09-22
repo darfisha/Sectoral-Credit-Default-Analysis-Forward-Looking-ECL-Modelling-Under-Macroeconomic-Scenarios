@@ -145,7 +145,7 @@ def load_data():
 @st.cache_data
 def train_models(X_train_scaled, y_train, X_test_scaled, y_test):
     """
-    Trains and evaluates multiple machine learning models.
+    Trains and evaluates multiple machine learning models with a progress bar.
     """
     models = {
         "Random Forest": RandomForestClassifier(n_estimators=300, max_depth=12, min_samples_split=5, class_weight="balanced", random_state=42),
@@ -155,9 +155,13 @@ def train_models(X_train_scaled, y_train, X_test_scaled, y_test):
 
     results = []
     trained_models = {}
+    
+    # Use a progress bar to show the training status
+    progress_bar = st.progress(0)
+    status_text = st.empty()
 
-    for name, model in models.items():
-        st.info(f"Training {name}...")
+    for i, (name, model) in enumerate(models.items()):
+        status_text.text(f"Training {name}...")
         model.fit(X_train_scaled, y_train)
         y_pred = model.predict(X_test_scaled)
         
@@ -174,7 +178,12 @@ def train_models(X_train_scaled, y_train, X_test_scaled, y_test):
 
         results.append([name, acc, prec, rec, f1, auc])
         trained_models[name] = model
+        
+        # Update progress bar
+        progress_bar.progress((i + 1) / len(models))
 
+    status_text.text("Training complete!")
+    
     results_df = pd.DataFrame(results, columns=["Model", "Accuracy", "Precision", "Recall", "F1-Score", "ROC-AUC"])
     results_df = results_df.sort_values(by="ROC-AUC", ascending=False).reset_index(drop=True)
     
