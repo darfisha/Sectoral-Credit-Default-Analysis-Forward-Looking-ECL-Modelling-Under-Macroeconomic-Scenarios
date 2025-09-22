@@ -2,53 +2,57 @@ import streamlit as st
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
 from sklearn.impute import SimpleImputer
-from catboost import CatBoostClassifier
-from xgboost import XGBClassifier
-from sklearn.ensemble import RandomForestClassifier
+from catboost import CatBoostRegressor
+from xgboost import XGBRegressor
+from sklearn.ensemble import RandomForestRegressor
 
 # -----------------------------
 # 1️⃣ Load CSV from GitHub
 # -----------------------------
-GITHUB_CSV_URL = "https://raw.githubusercontent.com/darfisha/Sectoral-Credit-Default-Analysis-Forward-Looking-ECL-Modelling-Under-Macroeconomic-Scenarios/refs/heads/main/merged_df.csv"
+RAW_URL = "https://raw.githubusercontent.com/darfisha/Sectoral-Credit-Default-Analysis-Forward-Looking-ECL-Modelling-Under-Macroeconomic-Scenarios/main/merged_df.csv"
 
 @st.cache_data
 def load_data(url):
     df = pd.read_csv(url)
     return df
 
-merged_df = load_data(GITHUB_CSV_URL)
+merged_df = load_data(RAW_URL)
 
 # -----------------------------
 # 2️⃣ Train models (cached)
 # -----------------------------
 @st.cache_resource
 def train_models(df):
+    # Select numeric features except the target
     features = df.select_dtypes(include='number').columns.drop('default_flag').tolist()
     X = df[features].values
-    y = df['default_flag'].values
+    y = df['default_flag'].values  # probabilities between 0 and 1
 
+    # Preprocessing
     imputer = SimpleImputer(strategy='mean')
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(imputer.fit_transform(X))
 
-    catboost_model = CatBoostClassifier(iterations=100, verbose=0)
-    catboost_model.fit(X_scaled, y)
+    # Regression models
+    cat_model = CatBoostRegressor(iterations=200, verbose=0)
+    cat_model.fit(X_scaled, y)
 
-    xgb_model = XGBClassifier(use_label_encoder=False, eval_metric='logloss')
+    xgb_model = XGBRegressor(n_estimators=200, eval_metric='rmse')
     xgb_model.fit(X_scaled, y)
 
-    rf_model = RandomForestClassifier(n_estimators=100, random_state=42)
+    rf_model = RandomForestRegressor(n_estimators=200, random_state=42)
     rf_model.fit(X_scaled, y)
 
     models = {
-        "CatBoost": {"model": catboost_model, "scaler": scaler, "imputer": imputer},
+        "CatBoost": {"model": cat_model, "scaler": scaler, "imputer": imputer},
         "XGBoost": {"model": xgb_model, "scaler": scaler, "imputer": imputer},
         "RandomForest": {"model": rf_model, "scaler": scaler, "imputer": imputer}
     }
+
     return models, features
 
 # -----------------------------
-# 3️⃣ Predict function (cached)
+# 3️⃣ Prediction function (cached)
 # -----------------------------
 @st.cache_data
 def predict(df, model_name):
@@ -59,16 +63,18 @@ def predict(df, model_name):
     imputer = model_info["imputer"]
 
     X_all = df[features].values
-    X_all_scaled = scaler.transform(imputer.transform(X_all))
+    X_scaled = scaler.transform(imputer.transform(X_all))
 
     df = df.copy()
-    df['default_prob'] = model.predict_proba(X_all_scaled)[:, 1]
+    df['default_prob'] = model.predict(X_scaled)
 
+    # ECL calculation (example)
     if 'original_principal_amount_ususd' in df.columns:
         df['ECL'] = df['default_prob'] * df['original_principal_amount_ususd']
     else:
         df['ECL'] = df['default_prob']
 
+    # Example sector assignment
     if 'Sector' not in df.columns:
         df['Sector'] = "Sector_" + (df.index % 3 + 1).astype(str)
 
@@ -89,11 +95,11 @@ page = st.sidebar.radio("Go to", ["Homepage", "Model Selection", "Feature Input 
 if page == "Homepage":
     st.title("Credit Risk Analysis & ECL Modelling")
     st.markdown("""
-        This web app allows you to:
-        - Evaluate Project-Level and Sectoral PD
-        - Compute Expected Credit Losses (ECL)
-        - Perform sectoral stress testing
-        - Compare CatBoost, XGBoost, and RandomForest predictions
+    This web app allows you to:
+    - Predict Project-Level and Sectoral Probability of Default (PD)
+    - Compute Expected Credit Loss (ECL)
+    - Perform sectoral stress testing
+    - Compare CatBoost, XGBoost, and RandomForest regressors
     """)
     st.write("Dataset preview:")
     st.dataframe(merged_df.head())
@@ -102,7 +108,7 @@ if page == "Homepage":
 # Model Selection
 # -----------------------------
 elif page == "Model Selection":
-    st.title("Select ML Model")
+    st.title("Select Regression Model")
     model_name = st.selectbox("Choose model", ["CatBoost", "XGBoost", "RandomForest"])
     st.write(f"You selected **{model_name}**.")
 
@@ -111,7 +117,7 @@ elif page == "Model Selection":
 # -----------------------------
 elif page == "Feature Input & Prediction":
     st.title("Dynamic Feature Input for Prediction")
-    _, _, _, features = predict(merged_df, "CatBoost")  # get features
+    _, _, _, features = predict(merged_df, "CatBoost")  # get feature list
     features_input = {}
 
     with st.form("feature_form"):
