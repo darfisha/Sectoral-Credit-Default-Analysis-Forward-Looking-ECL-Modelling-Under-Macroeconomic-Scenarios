@@ -8,32 +8,31 @@ from sklearn.ensemble import RandomForestRegressor
 import os
 
 # -----------------------------
-# 1️⃣ Load Data with Caching
+# 1️⃣ Load Data
 # -----------------------------
 @st.cache_data
 def load_and_preprocess_data():
-    """Loads and preprocesses the credit risk dataset from the local file."""
     file_path = "merged_df.csv"
     if not os.path.exists(file_path):
-        st.error("The 'merged_df.csv' file was not found. Please make sure it is in the same directory as the app.")
+        st.error("The 'merged_df.csv' file was not found.")
         return pd.DataFrame()
     
     try:
         df = pd.read_csv(file_path, low_memory=False)
     except Exception as e:
-        st.error(f"Error loading data from file: {e}")
+        st.error(f"Error loading data: {e}")
         return pd.DataFrame()
 
-    # Ensure 'ProjectName' exists
+    # Ensure ProjectName exists
     if 'project_name' in df.columns:
         df.rename(columns={'project_name': 'ProjectName'}, inplace=True)
     elif 'ProjectName' not in df.columns:
-        st.error("The dataset must contain a 'project_name' or 'ProjectName' column.")
+        st.error("Dataset must have 'ProjectName'.")
         return pd.DataFrame()
 
     df['ProjectName'] = df['ProjectName'].fillna("Unknown Project")
 
-    # --- Assign Sector before cleaning ---
+    # Assign Sector
     def assign_sector(name: str) -> str:
         n = str(name).upper()
         if any(w in n for w in ["ROAD", "HIGHWAY", "RAIL", "TRANSPORT", "LOGISTICS", "CORRIDOR", "EDFC", "MITP"]): return "Transport & Infrastructure"
@@ -52,12 +51,9 @@ def load_and_preprocess_data():
 
     df['sector'] = df['ProjectName'].apply(assign_sector)
 
-    # --- Clean other columns (except ProjectName and sector) ---
+    # Clean other columns except ProjectName and sector
     cols_to_clean = [col for col in df.columns if col not in ['ProjectName', 'sector']]
-    cleaned_cols = {
-        col: col.strip().lower().replace(" ", "_").replace("/", "_").replace("(", "").replace(")", "").replace("$", "usd").replace("'", "").replace(".", "")
-        for col in cols_to_clean
-    }
+    cleaned_cols = {col: col.strip().lower().replace(" ", "_").replace("/", "_").replace("(", "").replace(")", "").replace("$", "usd").replace("'", "").replace(".", "") for col in cols_to_clean}
     df.rename(columns=cleaned_cols, inplace=True)
 
     return df
@@ -70,10 +66,6 @@ def train_models(df):
     features_to_predict = ['default_flag', 'default_prob', 'ecl']
     numeric_cols = df.select_dtypes(include='number').columns.tolist()
     features = [col for col in numeric_cols if col not in features_to_predict]
-
-    if 'default_flag' not in df.columns:
-        st.error("Missing 'default_flag' column. Cannot train models.")
-        return {}, []
 
     X = df[features].values
     y = df['default_flag'].values
@@ -122,7 +114,7 @@ def predict_df(df, model_name, features):
     return df, sectoral_pd, sectoral_ecl
 
 # -----------------------------
-# 4️⃣ Streamlit App Layout
+# 4️⃣ Streamlit Layout
 # -----------------------------
 st.title("Credit Risk Analysis & ECL Modelling 📈")
 
@@ -133,34 +125,28 @@ if merged_df.empty:
 models, features = train_models(merged_df)
 
 st.sidebar.title("Navigation")
-page = st.sidebar.radio("Go to", ["Homepage", "Model Selection", "Project-Level Prediction", "Sectoral Analysis", "Stress Testing"])
+page = st.sidebar.radio("Go to", ["Homepage", "Project-Level Prediction", "Sectoral Analysis", "Stress Testing"])
 
 # --- Homepage ---
 if page == "Homepage":
     st.header("App Overview & Data Preview")
-    st.write("This app analyzes credit risk for projects, predicts default probabilities, and simulates financial stress scenarios.")
+    st.write("This app predicts project default probability (PD) and expected credit loss (ECL).")
     st.subheader("Dataset Preview")
     st.dataframe(merged_df.head())
     st.write(f"Dataset Shape: {merged_df.shape[0]} rows, {merged_df.shape[1]} columns")
 
-# --- Model Selection ---
-elif page == "Model Selection":
-    st.header("Select Regression Model")
-    model_name = st.selectbox("Choose a model for your analysis:", ["CatBoost", "XGBoost", "RandomForest"])
-    st.write(f"Using model: **{model_name}**")
-
 # --- Project-Level Prediction ---
 elif page == "Project-Level Prediction":
     st.header("Project-Level Prediction & Analysis")
-    model_name = st.selectbox("Select a model to use for prediction:", ["CatBoost", "XGBoost", "RandomForest"])
+    model_name = st.selectbox("Select a model:", ["CatBoost", "XGBoost", "RandomForest"])
     preds_df, _, _ = predict_df(merged_df, model_name, features)
-    st.subheader("Project-level PD & ECL")
-    st.dataframe(preds_df[['projectname', 'sector', 'default_prob', 'ecl']].sort_values(by='ecl', ascending=False).head(10))
+    st.subheader("Top 10 Projects by ECL")
+    st.dataframe(preds_df[['ProjectName', 'sector', 'default_prob', 'ecl']].sort_values(by='ecl', ascending=False).head(10))
 
 # --- Sectoral Analysis ---
 elif page == "Sectoral Analysis":
     st.header("Sectoral PD & ECL Analysis")
-    model_name = st.selectbox("Select a model to use for prediction:", ["CatBoost", "XGBoost", "RandomForest"])
+    model_name = st.selectbox("Select a model:", ["CatBoost", "XGBoost", "RandomForest"])
     _, sectoral_pd, sectoral_ecl = predict_df(merged_df, model_name, features)
     st.subheader("Average Sectoral PD")
     st.dataframe(sectoral_pd.sort_values(by='default_prob', ascending=False))
@@ -170,7 +156,7 @@ elif page == "Sectoral Analysis":
 # --- Stress Testing ---
 elif page == "Stress Testing":
     st.header("Stress Testing Scenario Simulation")
-    model_name = st.selectbox("Select a model to use for simulation:", ["CatBoost", "XGBoost", "RandomForest"])
+    model_name = st.selectbox("Select a model:", ["CatBoost", "XGBoost", "RandomForest"])
 
     # Top 4 numeric features excluding targets
     features_to_predict = ['default_flag', 'default_prob', 'ecl']
@@ -193,5 +179,5 @@ elif page == "Stress Testing":
         st.dataframe(sectoral_pd.sort_values(by='default_prob', ascending=False))
         st.subheader("Sectoral ECL under stress scenario")
         st.dataframe(sectoral_ecl.sort_values(by='ecl', ascending=False))
-        st.write("Project-level PD & ECL (first 10 rows) under the new scenario:")
-        st.dataframe(stressed_df[['projectname', 'sector', 'default_prob', 'ecl']].head(10))
+        st.write("Project-level PD & ECL (first 10 rows):")
+        st.dataframe(stressed_df[['ProjectName', 'sector', 'default_prob', 'ecl']].head(10))
