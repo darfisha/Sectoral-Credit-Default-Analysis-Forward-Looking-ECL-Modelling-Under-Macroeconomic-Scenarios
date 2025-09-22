@@ -22,6 +22,61 @@ import gdown
 
 st.set_page_config(layout="wide", page_title="Credit Risk Analysis")
 
+# --- Custom CSS for Styling ---
+st.markdown(
+    """
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+    
+    html, body, [class*="st-"] {
+        font-family: 'Inter', sans-serif;
+    }
+    .main-header {
+        font-size: 2.5rem;
+        font-weight: 700;
+        color: #2c3e50;
+        text-align: center;
+        margin-bottom: 2rem;
+    }
+    .stTabs [data-baseweb="tab-list"] button [data-testid="stMarkdownContainer"] p {
+        font-size: 1.1rem;
+        font-weight: 600;
+    }
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 10px;
+    }
+    .stTabs [data-baseweb="tab-list"] button {
+        background-color: #f0f2f6;
+        border-radius: 8px 8px 0 0;
+        padding: 10px 20px;
+    }
+    .stTabs [data-baseweb="tab-list"] button:hover {
+        background-color: #e0e2e6;
+    }
+    .stTabs [data-baseweb="tab-list"] button[aria-selected="true"] {
+        background-color: #ffffff;
+        border-bottom: 3px solid #3498db;
+    }
+    .stButton>button {
+        border-radius: 8px;
+        border: 1px solid #3498db;
+        color: #3498db;
+        background-color: transparent;
+    }
+    .stButton>button:hover {
+        color: #fff;
+        background-color: #3498db;
+    }
+    .css-1d391kg {
+        background-color: #f8f9fa;
+        padding: 2rem;
+        border-radius: 10px;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
 # --- Helper Functions and Data Caching ---
 
 @st.cache_data
@@ -154,7 +209,7 @@ def train_models(df):
         trained_models[name] = {"model": model, "test_auc": auc, "scaler": scaler, "imputer": imputer}
     return trained_models
 
-@st.cache_data
+@st.cache_resource
 def get_all_data_with_predictions(df, models):
     """Predicts default probability for all projects using the best model."""
     numeric_cols = [
@@ -198,7 +253,8 @@ def sector(name: str) -> str:
 
 # --- Main App Logic ---
 
-st.title("Credit Risk Analysis & Prediction")
+st.markdown('<h1 class="main-header">Credit Risk Analysis & Prediction 📊</h1>', unsafe_allow_html=True)
+st.write("A streamlined, interactive dashboard for assessing credit risk in financial projects.")
 
 # Use a spinner and progress bar for loading
 with st.spinner("Loading data and training models..."):
@@ -213,7 +269,7 @@ with st.spinner("Loading data and training models..."):
     st.balloons()
     
 # --- Sidebar for User Inputs and Model Selection ---
-st.sidebar.header("Input Features")
+st.sidebar.header("Input Features 🚀")
 
 input_features = {
     'interest_rate': st.sidebar.number_input("Interest Rate", value=0.05, format="%.2f"),
@@ -231,7 +287,7 @@ input_features = {
 }
 
 selected_model_name = st.sidebar.selectbox(
-    "Select Prediction Model",
+    "Select Prediction Model ✨",
     list(trained_models.keys()),
     index=list(trained_models.keys()).index("CatBoost")
 )
